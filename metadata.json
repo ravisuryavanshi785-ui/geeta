@@ -1,0 +1,8 @@
+{
+  "name": "RS Movie Spot",
+  "description": "AI Video Generator for Shorts (9:16) and YouTube (16:9) with script preview, neural TTS, real photos and video clips, auto-ducked cinematic BGM, and a YouTube upload kit.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
