@@ -1,11 +1,13 @@
 package com.rsmoviespot.ui
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rsmoviespot.data.api.repository.VideoRepository
+import com.rsmoviespot.domain.models.ContentMode
 import com.rsmoviespot.domain.models.InputMode
 import com.rsmoviespot.domain.models.MainUiState
 import com.rsmoviespot.domain.models.VideoLanguage
@@ -36,6 +38,10 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(topic = value, draftScript = null) }
     }
 
+    fun onContentModeSelected(mode: ContentMode) {
+        _uiState.update { it.copy(contentMode = mode, draftScript = null) }
+    }
+
     fun onInputModeSelected(mode: InputMode) {
         _uiState.update { it.copy(inputMode = mode, draftScript = null) }
     }
@@ -44,6 +50,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 topic = idea,
+                contentMode = ContentMode.REVIEW,
                 inputMode = InputMode.AI_PROMPT,
                 draftScript = null,
                 statusMessage = ""
@@ -81,6 +88,49 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     fun clearCustomBgm() {
         customBgmUri = null
         _uiState.update { it.copy(selectedBgmName = "Built-in Cinematic BGM", hasCustomBgm = false) }
+    }
+
+    fun onSceneCustomMediaPicked(index: Int, panel: Int, uri: Uri?) {
+        if (uri == null) return
+        val resolver = getApplication<Application>().contentResolver
+        runCatching {
+            resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val mime = resolver.getType(uri).orEmpty().lowercase()
+        val fileName = resolveFileName(uri).orEmpty().lowercase()
+        val isVideo = mime.startsWith("video/") ||
+            fileName.endsWith(".mp4") ||
+            fileName.endsWith(".mov") ||
+            fileName.endsWith(".mkv") ||
+            fileName.endsWith(".webm") ||
+            fileName.endsWith(".m4v")
+        if (panel == 2 && isVideo) {
+            _uiState.update { it.copy(statusMessage = "Panel 2 supports custom images; use Panel 1 for custom video clips.") }
+            return
+        }
+        val mediaType = if (isVideo) "video" else "image"
+        updateSlab(index) { slab ->
+            if (panel == 2) {
+                slab.copy(customMediaUri2 = uri.toString(), customMediaType2 = mediaType)
+            } else {
+                slab.copy(customMediaUri = uri.toString(), customMediaType = mediaType)
+            }
+        }
+    }
+
+    fun clearSceneCustomMedia(index: Int, panel: Int) {
+        updateSlab(index) { slab ->
+            if (panel == 2) {
+                slab.copy(customMediaUri2 = "", customMediaType2 = "")
+            } else {
+                slab.copy(customMediaUri = "", customMediaType = "")
+            }
+        }
+    }
+
+    fun resolveUriDisplayName(uriString: String): String {
+        if (uriString.isBlank()) return ""
+        return runCatching { resolveFileName(Uri.parse(uriString)) }.getOrNull() ?: "Custom Media"
     }
 
     fun loadTrendingTopics() {
@@ -127,7 +177,8 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                     voiceGender = current.selectedGender,
                     inputMode = current.inputMode,
                     voiceTone = current.selectedVoiceTone,
-                    visualStyle = current.selectedVisualStyle
+                    visualStyle = current.selectedVisualStyle,
+                    contentMode = current.contentMode
                 )
                 _uiState.update { it.copy(isPreviewingScript = false, draftScript = script) }
             } catch (err: Throwable) {
@@ -184,6 +235,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                     voiceTone = current.selectedVoiceTone,
                     visualStyle = current.selectedVisualStyle,
                     inputMode = current.inputMode,
+                    contentMode = current.contentMode,
                     onProgress = { pct, text ->
                         _uiState.update {
                             it.copy(progressPercentage = pct.coerceIn(0, 100), progressText = text)

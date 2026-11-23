@@ -12,6 +12,7 @@ import {
   startRenderJob,
 } from './server/renderEngine.ts';
 import type {
+  ContentMode,
   InputMode,
   VideoLanguageKey,
   VideoScriptResponse,
@@ -25,12 +26,16 @@ import { fetchTrendingMovieTopics, generateScript } from './server/videoReposito
 const PORT = 3000;
 const uploadDir = path.join(os.tmpdir(), 'rs-movie-spot-uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
-const upload = multer({ dest: uploadDir, limits: { fileSize: 30 * 1024 * 1024 } });
+const upload = multer({ dest: uploadDir, limits: { fileSize: 80 * 1024 * 1024, files: 40 } });
 
 async function startServer() {
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: '5mb' }));
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, ts: Date.now() });
+  });
 
   app.get('/api/trending', async (_req, res) => {
     try {
@@ -92,6 +97,7 @@ async function startServer() {
         inputMode?: InputMode;
         voiceTone?: VoiceTone;
         visualStyle?: VisualStyleMode;
+        contentMode?: ContentMode;
       };
       const script = await generateScript({
         topic: String(body.topic ?? ''),
@@ -101,6 +107,7 @@ async function startServer() {
         inputMode: body.inputMode ?? 'AUTO',
         voiceTone: body.voiceTone ?? 'AUTO',
         visualStyle: body.visualStyle ?? 'AUTO',
+        contentMode: body.contentMode ?? 'AUTO',
       });
       res.json({ script });
     } catch (err) {
@@ -109,12 +116,24 @@ async function startServer() {
     }
   });
 
-  app.post('/api/render/start', upload.single('bgmFile'), (req, res) => {
+  app.post('/api/render/start', upload.any(), (req, res) => {
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+    const cleanupUploaded = () => {
+      for (const f of uploadedFiles) {
+        if (f?.path && fs.existsSync(f.path)) {
+          try {
+            fs.unlinkSync(f.path);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
     try {
       const body = req.body as Record<string, string | undefined>;
       const topic = String(body.topic ?? '').trim();
       if (!topic) {
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        cleanupUploaded();
         res.status(400).json({ error: 'Enter a topic or script before generating a video.' });
         return;
       }
@@ -125,6 +144,20 @@ async function startServer() {
       const voiceTone = (body.voiceTone || 'AUTO') as VoiceTone;
       const inputMode = (body.inputMode || 'AUTO') as InputMode;
       const visualStyle = (body.visualStyle || 'AUTO') as VisualStyleMode;
+      const contentMode = (body.contentMode || 'AUTO') as ContentMode;
+
+      const bgmUploaded = uploadedFiles.find((f) => f.fieldname === 'bgmFile');
+      const customSceneMedia: Record<string, { path: string; mimetype: string; originalname: string }> = {};
+      for (const f of uploadedFiles) {
+        const m = /^sceneMedia_(\d+)_([12])$/.exec(f.fieldname || '');
+        if (m) {
+          customSceneMedia[`${m[1]}_${m[2]}`] = {
+            path: f.path,
+            mimetype: f.mimetype || '',
+            originalname: f.originalname || '',
+          };
+        }
+      }
 
       let preGeneratedScript: VideoScriptResponse | null = null;
       if (body.preGeneratedScript) {
@@ -138,18 +171,20 @@ async function startServer() {
       const jobId = startRenderJob({
         topic,
         isShorts,
-        customBgmPath: req.file?.path ?? null,
+        customBgmPath: bgmUploaded?.path ?? null,
+        customSceneMedia,
         preGeneratedScript,
         language,
         voiceGender,
         voiceTone,
         inputMode,
         visualStyle,
+        contentMode,
       });
 
       res.json({ jobId });
     } catch (err) {
-      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      cleanupUploaded();
       const message = err instanceof Error ? err.message : 'Failed to start render';
       res.status(500).json({ error: message });
     }
@@ -210,7 +245,10 @@ async function startServer() {
   });
 
   app.get('/downloads/RSMovieSpot-android-project.zip', (_req, res) => {
-    const zipPath = '/.aistudio/artifacts/brain/3073bc98-e555-42e6-9438-c3b56c918306/RSMovieSpot-android-project.zip';
+    const zipPath = path.resolve(
+      process.cwd(),
+      '.aistudio/artifacts/brain/3073bc98-e555-42e6-9438-c3b56c918306/RSMovieSpot-android-project.zip'
+    );
     if (!fs.existsSync(zipPath)) {
       res.status(404).send('Android project zip not found.');
       return;

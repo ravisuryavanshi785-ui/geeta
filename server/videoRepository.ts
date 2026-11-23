@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import sharp from 'sharp';
 import {
   resolveLanguageVoice,
+  type ContentMode,
   type InputMode,
   type VideoLanguageKey,
   type VideoScriptResponse,
@@ -72,11 +73,12 @@ const IMAGE_PROMPT_RULES =
   "- Vary camera framing across scenes (wide establishing shot, medium two-shot, close-up portrait, dramatic low-angle).\n\n";
 
 const VOICE_AND_BGM_RULES =
-  "VOICE EMOTION, BGM & YOUTUBE METADATA RULES:\n" +
+  "VOICE EMOTION, BGM & CHANNEL GROWTH METADATA RULES:\n" +
+  "- CHANNEL GROWTH HOOK & RETENTION STRUCTURE: Always craft an explosive 2-second curiosity/shock Hook in Scene 1 (voice_emotion='hook'), a mid-video retention twist or open loop around Scene 5-7 so viewers keep watching to the end, and a debate-sparking question CTA in the finale!\n" +
   "- Pick bgm_mood: 'comedy_roast', 'epic_action', 'suspense_thriller', 'emotional_sad', 'devotional', 'sci_fi_tech', 'motivational', or 'horror_dark'.\n" +
   "- For each scene, match voice_emotion dynamically from: 'hook', 'excited', 'climax', 'suspense', 'sad', 'roast', 'question', 'warm', or 'normal' (avoid repeating 'normal' on every line!).\n" +
   "- Pick valid Edge TTS voice_name (e.g. hi-IN-MadhurNeural, hi-IN-SwaraNeural, en-IN-PrabhatNeural, en-IN-NeerjaNeural, en-US-AndrewNeural, en-US-AvaNeural, etc.).\n" +
-  "- Also generate youtube_title (catchy <75 chars viral title with 1 emoji), youtube_description (2-3 crisp SEO lines), youtube_hashtags ('#shorts ...'), and pinned_comment (a question to spark viewer comments).\n\n";
+  "- Also generate high-CTR youtube_title (under 62 chars, strong curiosity gap + 1 punchy emoji), SEO youtube_description (2-3 crisp keyword-rich lines), 5-7 targeted youtube_hashtags ('#shorts ...'), and a comment-bait poll/question in pinned_comment to drive Shorts algorithm engagement.\n\n";
 
 const JSON_SCHEMA_SPEC =
   "Return ONLY ONE valid JSON object (no markdown fences, no commentary) matching this schema:\n" +
@@ -134,6 +136,83 @@ const TOPIC_SYSTEM_PROMPT =
   VOICE_AND_BGM_RULES +
   JSON_SCHEMA_SPEC;
 
+export function resolveEffectiveVoiceTone(voiceTone: VoiceTone, contentMode: ContentMode = 'AUTO'): VoiceTone {
+  if (voiceTone !== 'AUTO') return voiceTone;
+  switch (contentMode) {
+    case 'MOVIE_ROAST':
+      return 'FUNNY';
+    case 'REACTION':
+    case 'REVIEW':
+      return 'ENERGETIC';
+    case 'STORY':
+      return 'SERIOUS';
+    case 'KIDS_STORY':
+    case 'COOKING':
+      return 'NATURAL';
+    default:
+      return 'AUTO';
+  }
+}
+
+export function resolveEffectiveVisualStyle(
+  visualStyle: VisualStyleMode,
+  contentMode: ContentMode = 'AUTO'
+): VisualStyleMode {
+  if (visualStyle !== 'AUTO') return visualStyle;
+  if (contentMode === 'KIDS_STORY') return 'PIXAR_3D';
+  return 'AUTO';
+}
+
+function buildContentModeDirective(contentMode: ContentMode): string {
+  switch (contentMode) {
+    case 'REVIEW':
+      return [
+        'CONTENT MODE ACTIVE — MOVIE / TRAILER REVIEW:',
+        '- Structure: Explosive 2s curiosity hook -> spoiler-free setup -> cast, director & music breakdown -> star/hype verdict + audience rating poll.',
+        '- VISUALS: Mandatory real_photo (or layout_mode="flip" for pairs like Director+Movie Poster or Lead Cast duo) for EVERY named real actor, director, singer & official movie poster. Use raw 35mm live-action cinema scenes for original plot/reaction beats.',
+        '- BADGES & BGM: Include star/hype stat_badge on the verdict scene (e.g. "4/5 STARS", "8/10 HYPE", "MUST WATCH?"). Prefer epic_action or suspense_thriller bgm_mood.',
+      ].join('\n');
+    case 'MOVIE_ROAST':
+      return [
+        'CONTENT MODE ACTIVE — FUNNY MOVIE ROAST:',
+        '- Structure: Sharp, savage-yet-playful Indian YouTube creator comedy! Roast logic holes, dramatic tropes, and absurd stunts using ultra-crisp 6-10 word punchline scenes.',
+        '- VISUALS: Combine real_photo of named actors/movies with 2 to 4 well-timed meme_clip GIF cuts ("Disappointed Fan", "Confused Nick Young", "Facepalm", "Wait What") AND comedic satirical AI scenes.',
+        '- BADGES & BGM: Use witty uppercase punch stat_badge cues on roast moments ("LOGIC RIP", "WAIT WHAT?", "100% OVERACTING"). Set bgm_mood="comedy_roast" and vary voice_emotion between "roast", "hook", and "excited".',
+      ].join('\n');
+    case 'REACTION':
+      return [
+        'CONTENT MODE ACTIVE — CREATOR / AUDIENCE REACTION:',
+        '- Structure: First-person live creator reaction tone ("Bhai ruko! Yahan kya notice kiya?", "Is moment pe goosebumps aaye!"), rewind/pause callouts, and an opinion-split closing poll.',
+        '- VISUALS: Use layout_mode="split" or "flip" on 3 to 5 scenes pairing the movie/topic subject on Panel 1 with high-emotion live reaction photography or meme_clip cuts on Panel 2.',
+        '- BADGES & BGM: Use crisp reaction stat_badge cues ("MIND BLOWN", "WAIT FOR IT", "GOOSEBUMPS"). Vary voice_emotion between "hook", "excited", "question", "climax".',
+      ].join('\n');
+    case 'STORY':
+      return [
+        'CONTENT MODE ACTIVE — CINEMATIC STORYTELLING (KAHANI):',
+        '- Structure: Classic high-retention story arc — Scene 1 cliffhanger hook -> Named protagonist & world -> Rising conflict -> Mid-story shocking twist -> Emotional/thrilling climax & ending takeaway.',
+        '- VISUALS: STRICTLY visual_source="ai_generated" (real_photo_query="") across ALL scenes so random internet photos NEVER break story immersion! Lock character_bible (exact age, face, hair, clothing colors) across every has_character=true scene and vary wide/medium/close-up camera angles + layout_mode="flip" on climax beats.',
+        '- BADGES & BGM: Keep stat_badge empty ("") on most scenes (only optional story chapter/time cues like "THE TWIST" or "10 YEARS LATER"). Use suspense_thriller, emotional_sad, or horror_dark bgm_mood.',
+      ].join('\n');
+    case 'KIDS_STORY':
+      return [
+        'CONTENT MODE ACTIVE — KIDS MORAL / BEDTIME STORY:',
+        '- Structure: Simple, warm, playful storytelling (cute animals, magic, friendship, adventure) in easy language, ending with a clear heartfelt "Moral of the Story"!',
+        '- CONTENT SAFETY MANDATORY: ZERO horror, ZERO gore, ZERO violence, ZERO scary monsters — keep every scene joyful, magical, safe, and child-friendly.',
+        '- VISUALS: STRICTLY visual_source="ai_generated" (zero real_photo, zero video_clip/meme_clip!). Bright sunlit 3D Pixar Disney storybook animation aesthetic, cute expressive characters locked via character_bible.',
+        '- BADGES & BGM: Keep captions clean and friendly (stat_badge="" or simple "MORAL TIME!"). Set bgm_mood="motivational" and voice_emotion="warm" / "excited".',
+      ].join('\n');
+    case 'COOKING':
+      return [
+        'CONTENT MODE ACTIVE — COOKING / RECIPE SHORTS:',
+        '- Structure: Mouth-watering 2s hook ("Sirf 10 min me restaurant jaisa...") -> Ingredients showcase -> Step-by-step tadka/cooking -> Secret chef tip -> Sizzling final plating & taste verdict.',
+        '- VISUALS: STRICTLY visual_source="ai_generated" (zero real_photo, zero video_clip/meme_clip!) and has_character=false on dish close-ups! Write macro 45-degree DSLR food photography prompts (rising steam, sizzling golden tadka, vibrant spices, warm kitchen lighting).',
+        '- BADGES & BGM: Put crisp cooking step stat_badge cues on key stages ("STEP 1", "STEP 2", "SECRET TIP", "READY!"). Set bgm_mood="motivational" and cheerful energetic host delivery.',
+      ].join('\n');
+    default:
+      return '';
+  }
+}
+
 function buildVoiceToneDirective(voiceTone: VoiceTone): string {
   switch (voiceTone) {
     case 'NATURAL':
@@ -149,8 +228,9 @@ function buildVoiceToneDirective(voiceTone: VoiceTone): string {
   }
 }
 
-function buildVisualStyleDirective(visualStyle: VisualStyleMode): string {
-  switch (visualStyle) {
+function buildVisualStyleDirective(visualStyle: VisualStyleMode, contentMode: ContentMode = 'AUTO'): string {
+  const effectiveStyle = resolveEffectiveVisualStyle(visualStyle, contentMode);
+  switch (effectiveStyle) {
     case 'PIXAR_3D':
       return [
         "VISUAL MEDIUM MANDATORY — 3D PIXAR ANIMATED STORY FILM:",
@@ -338,6 +418,7 @@ export async function generateScript(params: {
   inputMode?: InputMode;
   voiceTone?: VoiceTone;
   visualStyle?: VisualStyleMode;
+  contentMode?: ContentMode;
 }): Promise<VideoScriptResponse> {
   const cleanInput = params.topic.trim();
   if (!cleanInput) throw new Error('Topic must not be blank.');
@@ -351,8 +432,9 @@ export async function generateScript(params: {
   const language: VideoLanguageKey = params.language ?? 'AUTO';
   const voiceGender: VoiceGender = params.voiceGender ?? 'MALE';
   const inputMode: InputMode = params.inputMode ?? 'AUTO';
-  const voiceTone: VoiceTone = params.voiceTone ?? 'AUTO';
-  const visualStyle: VisualStyleMode = params.visualStyle ?? 'AUTO';
+  const contentMode: ContentMode = params.contentMode ?? 'AUTO';
+  const voiceTone: VoiceTone = resolveEffectiveVoiceTone(params.voiceTone ?? 'AUTO', contentMode);
+  const visualStyle: VisualStyleMode = resolveEffectiveVisualStyle(params.visualStyle ?? 'AUTO', contentMode);
 
   const inputWords = cleanInput.split(/\s+/).filter(Boolean);
   const inputWordCount = inputWords.length;
@@ -367,7 +449,8 @@ export async function generateScript(params: {
   const systemPrompt = isFullScriptMode ? FULL_SCRIPT_SYSTEM_PROMPT : TOPIC_SYSTEM_PROMPT;
   const targetGenderLabel = voiceGender === 'FEMALE' ? 'Female' : 'Male';
   const toneDirective = buildVoiceToneDirective(voiceTone);
-  const styleDirective = buildVisualStyleDirective(visualStyle);
+  const styleDirective = buildVisualStyleDirective(visualStyle, contentMode);
+  const modeDirective = buildContentModeDirective(contentMode);
   const langConfig = VIDEO_LANGUAGES[language] ?? VIDEO_LANGUAGES.AUTO;
 
   const languageDirective =
@@ -386,8 +469,9 @@ export async function generateScript(params: {
         `MODE: FULL USER SCRIPT (${inputWordCount} words).`,
         "DO NOT rewrite, paraphrase, translate, add, or change a single word. Keep the EXACT user text intact and split sequentially into 11 to 16 cohesive spoken scenes (6-14 words each).",
         "MERGE SHORT HOOKS / SPLIT LONG CAST LINES: Combine tiny 1-3 word exclamations (e.g., 'रुको!', 'लेकिन एक मिनट!') with the following sentence, AND split long 20+ word sentences at commas/conjunctions (e.g., lead pair vs supporting cast in separate scenes). NEVER split inside a full name or cross a period.",
+        modeDirective,
         styleDirective,
-        "CAST, POSTERS & CLIPS: Whenever ANY real actor, director, or singer is named (and style is not 3D/Anime), visual_source MUST be 'real_photo' with ONLY their clean English full name (NEVER ai_generated for a real person!). If BOTH a director/actor AND a movie OR TWO actors appear in the same scene, set visual_source='real_photo', layout_mode='flip', visual_source_2='real_photo' (e.g., 'Sooraj Barjatya' + 'Yeh Prem Mol Liya movie poster', 'Ayushmann Khurrana' + 'Sharvari Wagh', 'Anupam Kher' + 'Seema Pahwa').",
+        "CAST, POSTERS & CLIPS: Whenever ANY real actor, director, or singer is named (and style is not 3D/Anime and Content Mode is not STORY/KIDS_STORY/COOKING), visual_source MUST be 'real_photo' with ONLY their clean English full name (NEVER ai_generated for a real person!). If BOTH a director/actor AND a movie OR TWO actors appear in the same scene, set visual_source='real_photo', layout_mode='flip', visual_source_2='real_photo' (e.g., 'Sooraj Barjatya' + 'Yeh Prem Mol Liya movie poster', 'Ayushmann Khurrana' + 'Sharvari Wagh', 'Anupam Kher' + 'Seema Pahwa').",
         "100% ASCII ENGLISH PROMPTS: NEVER leave Devanagari/Hindi words inside image_prompt or real_photo_query! Also NEVER prompt calendars, split-screen, UI icons, streaming icons, meters, gauges, scorecards, bold text, cards, or rating numbers in image_prompt (put ratings/dates like '8/10 HYPE METER' or '27 NOV' in stat_badge and depict cheering cinema/dramatic reaction scenes in image_prompt).",
         `Set voice_name matching the script's language and ${targetGenderLabel} gender (e.g., Hindi: ${resolveLanguageVoice(
           'HINDI',
@@ -401,28 +485,29 @@ export async function generateScript(params: {
         '',
         'USER SCRIPT:',
         cleanInput,
-      ].join('\n')
+      ].filter(Boolean).join('\n')
     : [
         `MODE: TOPIC / DIRECTOR PROMPT MODE (${inputWordCount} words). ACT ON EVERY INSTRUCTION BELOW AS THE FILM DIRECTOR:`,
         cleanInput,
         '',
+        modeDirective,
         styleDirective,
         '',
-        'CRITICAL DIRECTOR PROMPT RULES:',
+        'CRITICAL DIRECTOR & GROWTH PROMPT RULES:',
         "1) NEVER speak or copy meta-instructions ('Act as...', 'Create a fast 9:16...', 'Write a script...', 'Include...', 'Data to include', 'Scene 1:', 'Visual:', 'Image prompts') into voiceover_text! Put ONLY natural spoken storytelling narration in voiceover_text.",
         "2) Whenever the user describes visuals, scenes, camera shots, character appearance/costume, lighting, props, or style (in English, Hindi, or Hinglish), put those EXACT visual details right at the BEGINNING of image_prompt (in crisp English) with visual_source='ai_generated' — NEVER replace described visuals with generic crowds or unrelated real_photo.",
         "3) Match each scene's image_prompt to THAT SPECIFIC scene's action/subject! If a scene focuses on food/ingredients, scenery, or a secondary character, put THAT subject FIRST in image_prompt and set has_character=false. NEVER include gibberish-prone text, logos, cinema marquees, or hands gripping microphones.",
-        "4) Keep every scene's voiceover_text as ONE complete, finished sentence ending in '.', '!', '?' or '।' (7-12 words; NEVER leave a trailing comma or unfinished word like 'और'/'and'/'or'). Only use 'video_clip'/'meme_clip' for movie/celebrity/roast topics where real trailer or meme clips fit; for cooking recipes, tutorials, devotional, history, or pure story prompts use 'ai_generated' (and 'real_photo' only for real people/places).",
+        "4) Keep every scene's voiceover_text as ONE complete, finished sentence ending in '.', '!', '?' or '।' (7-12 words; NEVER leave a trailing comma or unfinished word like 'और'/'and'/'or'). Use 'video_clip'/'meme_clip' ONLY when Content Mode fits (Review, Movie Roast, Reaction); for Story, Kids Story, or Cooking use 'ai_generated'.",
         languageDirective,
         `Voice delivery & writing tone: ${toneDirective}`,
         `Format guideline: ${
           isShorts
-            ? 'Vertical 9:16 YouTube Shorts. Unless the user specifies another length, create 13 to 16 fast-paced scenes (7-12 words / ~2.5-3.5s each, ~45-50s total) so NO image sits static for long!'
+            ? 'Vertical 9:16 YouTube Shorts. Unless the user specifies another length, create 13 to 16 fast-paced scenes (7-12 words / ~2.5-3.5s each, ~45-50s total) with a 2s Hook, mid-video twist, and comment CTA!'
             : 'Horizontal 16:9 YouTube video. Unless the user specifies another length, create 14 to 18 tightly connected scenes (~65-80s total).'
         }`,
         "Write an expressive, complete narration across all scenes where each scene ends cleanly on a full thought with varied per-scene voice_emotion ('hook', 'excited', 'climax', 'suspense', 'sad', 'roast', 'question', 'warm', 'normal'), exclamation (!), question (?), and dramatic pauses (...) so voice intonation sounds dynamic and alive — NEVER a flat newsreader.",
         "Return ONLY ONE complete valid JSON object with properly closed 'slabs' array ']' and root object '}'. Avoid unescaped double quotes inside JSON string values; use single quotes if quoting dialogue.",
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -812,21 +897,34 @@ function buildImageSuffix(promptLower: string, isShorts: boolean): string {
   return `, raw 35mm DSLR live-action movie set photograph, ONE single unified ${aspect}, candid film still, realistic natural skin pores and authentic textures, shallow depth of field, cinema lighting, clean unlabelled background, no collage, no grid, no multiple panels, no text, no words, no signs, no watermark, no UI, no logos`;
 }
 
-export async function generateImageForSlab(prompt: string, isShorts: boolean, seed: number): Promise<Buffer> {
+export async function generateImageForSlab(
+  prompt: string,
+  isShorts: boolean,
+  seed: number,
+  contentMode: ContentMode = 'AUTO'
+): Promise<Buffer> {
   const accountId = (process.env.CLOUDFLARE_ACCOUNT_ID ?? '').trim();
   const apiToken = (process.env.CLOUDFLARE_API_TOKEN ?? '').trim();
   const width = isShorts ? SHORTS_IMAGE_WIDTH : LANDSCAPE_IMAGE_WIDTH;
   const height = isShorts ? SHORTS_IMAGE_HEIGHT : LANDSCAPE_IMAGE_HEIGHT;
   const cleanPrompt = prompt.trim().replace(/[,.]+$/, '');
-  const finalPrompt = cleanPrompt + buildImageSuffix(cleanPrompt.toLowerCase(), isShorts);
+  const modePromptBoost =
+    contentMode === 'COOKING' && !/\b(food photography|macro|kitchen|steam|plating)\b/i.test(cleanPrompt)
+      ? `${cleanPrompt}, appetizing macro food photography, warm kitchen studio lighting, fresh garnish`
+      : cleanPrompt;
+  const finalPrompt = modePromptBoost + buildImageSuffix(modePromptBoost.toLowerCase(), isShorts);
 
   const errors: string[] = [];
 
   if (accountId && apiToken && Date.now() >= cloudflareExhaustedUntilMs) {
+    const isCfTerminalCode = (err: unknown) => {
+      const c = (err as { code?: number })?.code;
+      return c === 401 || c === 403 || c === 429;
+    };
     try {
       return await executeCloudflareWithRetry(() => requestFluxKlein9b(accountId, apiToken, finalPrompt, width, height));
     } catch (err) {
-      if ((err as { code?: number })?.code === 429) cloudflareExhaustedUntilMs = Date.now() + 5 * 60_000;
+      if (isCfTerminalCode(err)) cloudflareExhaustedUntilMs = Date.now() + 10 * 60_000;
       errors.push(`flux-2-klein-9b: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
     }
 
@@ -836,7 +934,7 @@ export async function generateImageForSlab(prompt: string, isShorts: boolean, se
           requestLucidOrigin(accountId, apiToken, finalPrompt, width, height, seed)
         );
       } catch (err) {
-        if ((err as { code?: number })?.code === 429) cloudflareExhaustedUntilMs = Date.now() + 5 * 60_000;
+        if (isCfTerminalCode(err)) cloudflareExhaustedUntilMs = Date.now() + 10 * 60_000;
         errors.push(`lucid-origin: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
       }
     }
@@ -845,48 +943,70 @@ export async function generateImageForSlab(prompt: string, isShorts: boolean, se
       try {
         return await executeCloudflareWithRetry(() => requestFluxSchnell(accountId, apiToken, finalPrompt));
       } catch (err) {
-        if ((err as { code?: number })?.code === 429) cloudflareExhaustedUntilMs = Date.now() + 5 * 60_000;
+        if (isCfTerminalCode(err)) cloudflareExhaustedUntilMs = Date.now() + 10 * 60_000;
         errors.push(`flux-1-schnell: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
       }
     }
   }
 
-  // Tier 2: AI Horde (free, watermark-free; stays within <=5.0 anonymous KudosUpfront cap)
-  const promptLower = cleanPrompt.toLowerCase();
-  const is3dPrompt = ['3d', 'pixar', 'disney', 'cgi', 'dreamworks', 'blender'].some((k) => promptLower.includes(k));
+  // Tier 2: AI Horde (free, watermark-free; smart live queue-aware model routing)
+  const promptLower = modePromptBoost.toLowerCase();
+  const is3dPrompt =
+    contentMode === 'KIDS_STORY' ||
+    ['3d', 'pixar', 'disney', 'cgi', 'dreamworks', 'blender'].some((k) => promptLower.includes(k));
   const isAnimePrompt = !is3dPrompt && ['anime', 'manga', 'cel-shaded', 'ghibli', 'shonen'].some((k) => promptLower.includes(k));
   const hordeTag = is3dPrompt
-    ? ', 3D Pixar Disney CGI animation render, volumetric lighting, rich 3D depth, sharp focus'
+    ? ', 3D Pixar Disney CGI animation render, volumetric lighting, rich 3D depth, crisp detail, vibrant colors'
     : isAnimePrompt
-    ? ', anime film frame, Makoto Shinkai cinematic lighting, crisp cel shading, sharp focus'
-    : ', photorealistic, crisp 35mm photography, sharp focus, cinematic lighting';
+    ? ', anime film frame, Makoto Shinkai cinematic lighting, crisp cel shading, high detail'
+    : contentMode === 'COOKING'
+    ? ', appetizing macro DSLR food photography, warm kitchen studio lighting, sharp focus'
+    : ', photorealistic, crisp 35mm cinema photography, sharp focus, dramatic lighting';
   const hordeTagShort = is3dPrompt
     ? ', 3D Pixar CGI animated frame'
     : isAnimePrompt
     ? ', anime cinematic frame'
     : ', cinematic photograph';
 
+  const baseNegative =
+    'text, words, letters, typography, numbers, digits, watermark, signature, logo, banner, ui overlay, chart, gauge, meter, cards, collage, grid, split screen, deformed face, ugly face, distorted eyes, bad anatomy, extra fingers, mutated hands, blurry, lowres, worst quality, out of focus';
   const hordeNegativePrompt =
-    'text, words, letters, typography, numbers, digits, watermark, signature, logo, banner, ui overlay, chart, gauge, meter, cards, collage, grid, split screen, deformed face, ugly face, distorted eyes, bad anatomy, extra fingers, mutated hands, blurry, lowres, worst quality';
-  const hordeModels = isAnimePrompt
-    ? ['Counterfeit', 'Anything Diffusion', 'Nova Anime XL', 'Animagine XL']
-    : ['Deliberate 3.0', 'Deliberate', 'AbsoluteReality'];
+    contentMode === 'KIDS_STORY'
+      ? `${baseNegative}, scary, horror, blood, gore, dark violence, creepy, nightmare, weapon`
+      : baseNegative;
 
-  const hordeWidth = isShorts ? 448 : 576;
-  const hordeHeight = isShorts ? 576 : 448;
-  const hordePrompt = `${cleanPrompt.slice(0, 320)}${hordeTag} ### ${hordeNegativePrompt}`;
-  const hordeFallbackPrompt = `${cleanPrompt.slice(0, 200)}${hordeTagShort} ### ${hordeNegativePrompt}`;
+  const hordeStyle: '3d' | 'anime' | 'photo' = is3dPrompt ? '3d' : isAnimePrompt ? 'anime' : 'photo';
+  const rankedHordeModels = await resolveFastAiHordeModels(hordeStyle).catch(() =>
+    getFallbackHordeModels(hordeStyle)
+  );
+  const primaryModels = rankedHordeModels.slice(0, 3);
+  const backupModels =
+    rankedHordeModels.length > 3 ? rankedHordeModels.slice(3, 6) : getFallbackHordeModels(hordeStyle);
+
+  const hordeWidth = isShorts ? 448 : 640;
+  const hordeHeight = isShorts ? 704 : 384;
+  const hordePrompt = `${modePromptBoost.slice(0, 360)}${hordeTag} ### ${hordeNegativePrompt}`;
+  const hordeFallbackPrompt = `${modePromptBoost.slice(0, 220)}${hordeTagShort} ### ${hordeNegativePrompt}`;
   const hordeBuf =
-    (await generateViaAiHorde(hordePrompt, hordeWidth, hordeHeight, 14, seed, width, height, hordeModels).catch(() => null)) ??
+    (await generateViaAiHorde(
+      hordePrompt,
+      hordeWidth,
+      hordeHeight,
+      16,
+      seed,
+      width,
+      height,
+      primaryModels
+    ).catch(() => null)) ??
     (await generateViaAiHorde(
       hordeFallbackPrompt,
-      isShorts ? 384 : 512,
-      isShorts ? 512 : 384,
-      12,
+      isShorts ? 448 : 576,
+      isShorts ? 576 : 448,
+      14,
       seed + 13,
       width,
       height,
-      undefined
+      backupModels
     ).catch(() => null));
   if (hordeBuf) return hordeBuf;
 
@@ -910,6 +1030,104 @@ export async function generateImageForSlab(prompt: string, isShorts: boolean, se
   if (pollBuf) return pollBuf;
 
   throw new Error(`Image generation failed: ${errors.join(' | ')}`);
+}
+
+let cachedHordeModelsAtMs = 0;
+let cachedHordeModelsList: Array<{ name: string; count: number; eta: number; queued: number }> = [];
+
+function getFallbackHordeModels(style: '3d' | 'anime' | 'photo'): string[] {
+  if (style === '3d') {
+    return ['Rev Animated', 'DreamShaper', '3D Animation Diffusion', 'AlbedoBase XL (SDXL)', 'Anything Diffusion'];
+  }
+  if (style === 'anime') {
+    return ['Flat-2D Animerge', 'Nova Anime XL', 'MeinaMix', 'Counterfeit', 'Anything Diffusion'];
+  }
+  return ['Edge Of Realism', 'Rev Animated', 'Deliberate', 'AbsoluteReality', 'Analog Madness'];
+}
+
+async function resolveFastAiHordeModels(style: '3d' | 'anime' | 'photo'): Promise<string[]> {
+  const preferredPool =
+    style === '3d'
+      ? [
+          'Rev Animated',
+          '3D Animation Diffusion',
+          'DreamShaper',
+          'Disney Pixar Cartoon',
+          'AlbedoBase XL (SDXL)',
+          'Flat-2D Animerge',
+          'Anything Diffusion',
+          'Deliberate',
+        ]
+      : style === 'anime'
+      ? [
+          'Nova Anime XL',
+          'Flat-2D Animerge',
+          'MeinaMix',
+          'Counterfeit',
+          'Anything Diffusion',
+          'Abyss OrangeMix',
+          'Animagine XL',
+          'Rev Animated',
+        ]
+      : [
+          'Edge Of Realism',
+          'EpicRealism',
+          'AbsoluteReality',
+          'Realistic Vision',
+          'Analog Madness',
+          'Deliberate',
+          'AlbedoBase XL (SDXL)',
+          'Rev Animated',
+        ];
+
+  if (Date.now() - cachedHordeModelsAtMs > 60_000 || cachedHordeModelsList.length === 0) {
+    const res = await fetch('https://aihorde.net/api/v2/status/models?type=image', {
+      headers: {
+        Accept: 'application/json',
+        'Client-Agent': 'RSMovieSpot:1.0:rsmoviespot@app.local',
+      },
+      signal: AbortSignal.timeout(7000),
+    });
+    if (res.ok) {
+      const raw = (await res.json()) as Array<{ name?: string; count?: number; eta?: number; queued?: number }>;
+      cachedHordeModelsList = raw
+        .filter((m) => m.name && (m.count ?? 0) >= 1 && m.name !== 'stable_diffusion')
+        .map((m) => ({
+          name: String(m.name),
+          count: Number(m.count ?? 0),
+          eta: Number(m.eta ?? 999),
+          queued: Number(m.queued ?? 0),
+        }));
+      cachedHordeModelsAtMs = Date.now();
+    }
+  }
+
+  if (cachedHordeModelsList.length === 0) {
+    return getFallbackHordeModels(style);
+  }
+
+  const scored: Array<{ name: string; score: number }> = [];
+  preferredPool.forEach((candidateName, idx) => {
+    const live = cachedHordeModelsList.find((m) => m.name.toLowerCase() === candidateName.toLowerCase());
+    if (!live) return;
+    // Strongly prefer fast queue (low eta) and style rank
+    const fastBonus = live.eta <= 15 ? 400 : live.eta <= 35 ? 250 : live.eta <= 75 ? 90 : -250;
+    const styleBonus = (preferredPool.length - idx) * 18;
+    const workerBonus = Math.min(40, live.count * 6);
+    scored.push({ name: live.name, score: fastBonus + styleBonus + workerBonus - live.eta });
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const picked = scored.map((s) => s.name);
+  if (picked.length > 0) return picked;
+
+  // Ultimate fast fallback: any clean non-NSFW online model with shortest queue
+  const fastAny = cachedHordeModelsList
+    .filter((m) => !/nsfw|hentai|furry|pony|pixel/i.test(m.name) && m.eta <= 45)
+    .sort((a, b) => a.eta - b.eta)
+    .slice(0, 4)
+    .map((m) => m.name);
+  return fastAny.length > 0 ? fastAny : getFallbackHordeModels(style);
 }
 
 async function generateViaAiHorde(
@@ -968,8 +1186,8 @@ async function generateViaAiHorde(
   }
   if (!genId) return null;
 
-  for (let poll = 0; poll < 28; poll++) {
-    await new Promise((r) => setTimeout(r, 2500));
+  for (let poll = 0; poll < 22; poll++) {
+    await new Promise((r) => setTimeout(r, 2000));
     const checkRes = await fetch(`https://aihorde.net/api/v2/generate/check/${genId}`, {
       headers: {
         Accept: 'application/json',
@@ -979,8 +1197,24 @@ async function generateViaAiHorde(
       signal: AbortSignal.timeout(10_000),
     }).catch(() => null);
     if (!checkRes || !checkRes.ok) continue;
-    const check = (await checkRes.json()) as { done?: boolean; faulted?: boolean; is_possible?: boolean };
+    const check = (await checkRes.json()) as {
+      done?: boolean;
+      faulted?: boolean;
+      is_possible?: boolean;
+      wait_time?: number;
+      queue_position?: number;
+      processing?: number;
+    };
     if (check.faulted || check.is_possible === false) return null;
+    // Fast-bail congested queues after 2 polls (~4s) so we immediately switch to zero-queue model
+    if (
+      poll >= 2 &&
+      (check.processing ?? 0) === 0 &&
+      (check.queue_position ?? 0) > 35 &&
+      (check.wait_time ?? 0) > 75
+    ) {
+      return null;
+    }
     if (check.done) {
       const statusRes = await fetch(`https://aihorde.net/api/v2/generate/status/${genId}`, {
         headers: {
@@ -1003,7 +1237,12 @@ async function generateViaAiHorde(
       const buf = Buffer.from(await imgRes.arrayBuffer());
       if (buf.length < 4096) return null;
       try {
-        return await sharp(buf).resize(targetWidth, targetHeight, { fit: 'cover' }).jpeg({ quality: 92 }).toBuffer();
+        return await sharp(buf)
+          .resize(targetWidth, targetHeight, { fit: 'cover', kernel: sharp.kernel.lanczos3 })
+          .sharpen({ sigma: 0.85, m1: 0.9, m2: 1.5 })
+          .modulate({ saturation: 1.07 })
+          .jpeg({ quality: 94 })
+          .toBuffer();
       } catch {
         return buf;
       }

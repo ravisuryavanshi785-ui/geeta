@@ -17,6 +17,7 @@ import android.net.Uri
 import com.rsmoviespot.data.api.EdgeTtsApi
 import com.rsmoviespot.data.api.GeminiTtsApi
 import com.rsmoviespot.data.api.repository.VideoRepository
+import com.rsmoviespot.domain.models.ContentMode
 import com.rsmoviespot.domain.models.InputMode
 import com.rsmoviespot.domain.models.VideoLanguage
 import com.rsmoviespot.domain.models.VideoScriptResponse
@@ -80,10 +81,14 @@ class VideoRenderEngine(
         voiceTone: VoiceTone,
         inputMode: InputMode,
         visualStyle: VisualStyleMode = VisualStyleMode.AUTO,
+        contentMode: ContentMode = ContentMode.AUTO,
         onProgress: (percent: Int, message: String) -> Unit
     ): RenderResult = withContext(Dispatchers.Default) {
         val cleanTopic = topic.trim()
         require(cleanTopic.isNotEmpty()) { "Topic must not be blank." }
+
+        val effectiveTone = repository.resolveEffectiveVoiceTone(voiceTone, contentMode)
+        val effectiveVisualStyle = repository.resolveEffectiveVisualStyle(visualStyle, contentMode)
 
         val width = if (isShorts) SHORTS_WIDTH else LANDSCAPE_WIDTH
         val height = if (isShorts) SHORTS_HEIGHT else LANDSCAPE_HEIGHT
@@ -97,7 +102,7 @@ class VideoRenderEngine(
                 preGeneratedScript
             } else {
                 onProgress(2, "Generating story script…")
-                repository.generateScript(cleanTopic, isShorts, language, voiceGender, inputMode, voiceTone, visualStyle)
+                repository.generateScript(cleanTopic, isShorts, language, voiceGender, inputMode, effectiveTone, effectiveVisualStyle, contentMode)
             }
             coroutineContext.ensureActive()
             require(script.slabs.isNotEmpty()) { "The generated script has no scenes." }
@@ -119,7 +124,7 @@ class VideoRenderEngine(
                     geminiTts.synthesizeOneTicketSceneClips(
                         slabs = script.slabs,
                         voiceGender = voiceGender,
-                        voiceTone = voiceTone,
+                        voiceTone = effectiveTone,
                         language = language
                     )
                 }.getOrNull()
@@ -135,7 +140,7 @@ class VideoRenderEngine(
                 synthesizeAndTrimVoiceClips(
                     slabs = script.slabs,
                     activeVoice = activeVoice,
-                    voiceTone = voiceTone,
+                    voiceTone = effectiveTone,
                     workDir = workDir
                 )
             }
@@ -162,7 +167,8 @@ class VideoRenderEngine(
                                 seed = baseSeed + idx * 31,
                                 workDir = workDir,
                                 topicContext = topicContext,
-                                visualStyleMode = visualStyle,
+                                visualStyleMode = effectiveVisualStyle,
+                                contentMode = contentMode,
                                 usedUrls = usedMediaUrls,
                                 usedHashes = usedImageHashes
                             )
@@ -342,6 +348,41 @@ class VideoRenderEngine(
             .trim(' ', ',', '.')
     }
 
+    private fun loadCustomBitmapFromUri(uriStr: String, width: Int, height: Int): Bitmap? {
+        if (uriStr.isBlank()) return null
+        return runCatching {
+            val uri = Uri.parse(uriStr)
+            val raw = context.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream)
+            } ?: return null
+            if (ImageComposer.isMostlyBlackOrCorrupt(raw)) {
+                raw.recycle()
+                return null
+            }
+            val studio = ImageComposer.composeStudioBitmapFromRealPhoto(context, raw, width, height)
+            raw.recycle()
+            studio
+        }.getOrNull()
+    }
+
+    private fun extractFirstFrameFromCustomVideoUri(uriStr: String, width: Int, height: Int): Bitmap? {
+        if (uriStr.isBlank()) return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, Uri.parse(uriStr))
+            val frame = retriever.getFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.frameAtTime
+                ?: return null
+            val studio = ImageComposer.composeStudioBitmapFromRealPhoto(context, frame, width, height)
+            frame.recycle()
+            studio
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
     private suspend fun buildSceneVisualPair(
         slab: VideoSlab,
         index: Int,
@@ -352,17 +393,31 @@ class VideoRenderEngine(
         workDir: File,
         topicContext: String,
         visualStyleMode: VisualStyleMode,
+        contentMode: ContentMode,
         usedUrls: MutableSet<String>,
         usedHashes: MutableSet<String>
     ): Pair<Bitmap, Bitmap?> {
+        if (slab.customMediaUri.isNotBlank() && slab.customMediaType == "video") {
+            val cover = extractFirstFrameFromCustomVideoUri(slab.customMediaUri, width, height)
+                ?: ImageComposer.createFallbackCinemaBitmap(width, height, seed)
+            return cover to null
+        }
+
         val forcedStylized = visualStyleMode == VisualStyleMode.PIXAR_3D || visualStyleMode == VisualStyleMode.ANIME_3D
+        val strictAiMode = contentMode in setOf(ContentMode.STORY, ContentMode.KIDS_STORY, ContentMode.COOKING)
+        val forceAiOnly = forcedStylized || strictAiMode
         val layout = slab.layout_mode.lowercase().trim()
         val isSplit = layout == "split"
         val panel1W = if (isSplit && height <= width) (width / 2) - 3 else width
         val panel1H = if (isSplit && height > width) (height / 2) - 3 else height
-        val primary = fetchVisualBitmap(
-            source = if (forcedStylized) "ai_generated" else slab.visual_source,
-            query = if (forcedStylized) "" else slab.real_photo_query,
+
+        val customPrimary = if (slab.customMediaUri.isNotBlank()) {
+            loadCustomBitmapFromUri(slab.customMediaUri, panel1W, panel1H)
+        } else null
+
+        val primary = customPrimary ?: fetchVisualBitmap(
+            source = if (forceAiOnly) "ai_generated" else slab.visual_source,
+            query = if (forceAiOnly) "" else slab.real_photo_query,
             prompt = slab.image_prompt,
             isShorts = if (isSplit) panel1H > panel1W else isShorts,
             width = panel1W,
@@ -372,15 +427,19 @@ class VideoRenderEngine(
             workDir = workDir,
             topicContext = topicContext,
             visualStyleMode = visualStyleMode,
+            contentMode = contentMode,
             usedUrls = usedUrls,
             usedHashes = usedHashes
         )
         if (layout == "split" || layout == "flip") {
             val panel2W = if (isSplit && height <= width) width - ((width / 2) + 3) else width
             val panel2H = if (isSplit && height > width) height - ((height / 2) + 3) else height
-            val secondary = fetchVisualBitmap(
-                source = if (forcedStylized) "ai_generated" else slab.visual_source_2.ifBlank { "ai_generated" },
-                query = if (forcedStylized) "" else slab.real_photo_query_2,
+            val customSecondary = if (slab.customMediaUri2.isNotBlank()) {
+                loadCustomBitmapFromUri(slab.customMediaUri2, panel2W, panel2H)
+            } else null
+            val secondary = customSecondary ?: fetchVisualBitmap(
+                source = if (forceAiOnly) "ai_generated" else slab.visual_source_2.ifBlank { "ai_generated" },
+                query = if (forceAiOnly) "" else slab.real_photo_query_2,
                 prompt = slab.image_prompt_2.ifBlank { slab.image_prompt },
                 isShorts = if (isSplit) panel2H > panel2W else isShorts,
                 width = panel2W,
@@ -390,6 +449,7 @@ class VideoRenderEngine(
                 workDir = workDir,
                 topicContext = topicContext,
                 visualStyleMode = visualStyleMode,
+                contentMode = contentMode,
                 usedUrls = usedUrls,
                 usedHashes = usedHashes
             )
@@ -422,12 +482,14 @@ class VideoRenderEngine(
         workDir: File,
         topicContext: String,
         visualStyleMode: VisualStyleMode,
+        contentMode: ContentMode,
         usedUrls: MutableSet<String>,
         usedHashes: MutableSet<String>
     ): Bitmap {
         val normSource = source.lowercase().trim()
         val forcedStylized = visualStyleMode == VisualStyleMode.PIXAR_3D || visualStyleMode == VisualStyleMode.ANIME_3D
-        val preferAi = forcedStylized || repository.isNonCelebrityOrRecipeTopic(query.ifBlank { prompt }, topicContext)
+        val strictAiMode = contentMode in setOf(ContentMode.STORY, ContentMode.KIDS_STORY, ContentMode.COOKING)
+        val preferAi = forcedStylized || strictAiMode || repository.isNonCelebrityOrRecipeTopic(query.ifBlank { prompt }, topicContext)
 
         if (!preferAi && (normSource == "video_clip" || normSource == "meme_clip")) {
             val clipFile = File(workDir, "$tag.mp4")
@@ -475,11 +537,13 @@ class VideoRenderEngine(
         val cleanPrompt = sanitizePromptText(prompt).ifBlank { "dramatic 35mm live action cinema scene with moody warm lighting" }
         val promptLower = cleanPrompt.lowercase()
         val is3dStyle = visualStyleMode == VisualStyleMode.PIXAR_3D ||
+            contentMode == ContentMode.KIDS_STORY ||
             listOf("3d", "pixar", "disney", "cgi").any { it in promptLower }
         val isAnimeStyle = !is3dStyle && (visualStyleMode == VisualStyleMode.ANIME_3D ||
             listOf("anime", "cel-shaded", "ghibli").any { it in promptLower })
         val prefixedPrimary = when {
-            visualStyleMode == VisualStyleMode.PIXAR_3D && !listOf("3d", "pixar", "disney", "cgi").any { it in promptLower } ->
+            (visualStyleMode == VisualStyleMode.PIXAR_3D || contentMode == ContentMode.KIDS_STORY) &&
+                !listOf("3d", "pixar", "disney", "cgi").any { it in promptLower } ->
                 "3D Pixar Disney CGI animated scene, $cleanPrompt"
             visualStyleMode == VisualStyleMode.ANIME_3D && !listOf("anime", "cel-shaded", "ghibli").any { it in promptLower } ->
                 "Cinematic anime animation film frame, $cleanPrompt"
@@ -488,6 +552,7 @@ class VideoRenderEngine(
         val retryTail = when {
             is3dStyle -> "3D Pixar Disney animated CGI scene, vibrant volumetric lighting, rich detail"
             isAnimeStyle -> "Cinematic anime film frame, dramatic lighting, sharp detail"
+            contentMode == ContentMode.COOKING -> "appetizing macro DSLR food photography, warm kitchen studio lighting, sharp focus"
             else -> "candid studio photograph, rich warm lighting, sharp focus"
         }
 
@@ -499,7 +564,7 @@ class VideoRenderEngine(
                 "${prefixedPrimary.trim().take(180)}, $retryTail"
             }
             val aiResult = runCatching {
-                repository.generateImageForSlabWithMeta(effectivePrompt, isShorts, effectiveSeed)
+                repository.generateImageForSlabWithMeta(effectivePrompt, isShorts, effectiveSeed, contentMode)
             }.getOrNull() ?: continue
             val hash = sha256Hex(aiResult.bytes)
             if (!usedHashes.add(hash)) continue
@@ -521,7 +586,7 @@ class VideoRenderEngine(
 
         val fallbackQuery = query.ifBlank { prompt }
         val stockFile = File(workDir, "${tag}_stock.jpg")
-        if (fallbackQuery.isNotBlank() && repository.downloadStockPhotoFallback(
+        if (!strictAiMode && fallbackQuery.isNotBlank() && repository.downloadStockPhotoFallback(
                 query = fallbackQuery,
                 usedUrls = usedUrls,
                 destinationFile = stockFile,
@@ -847,69 +912,128 @@ class VideoRenderEngine(
                 val part2Text = captionWords.drop(midWord).joinToString(" ")
                 val isLastScene = sIdx == slabs.lastIndex
 
-                for (f in 0 until count) {
-                    coroutineContext.ensureActive()
-                    val tNorm = if (count > 1) f.toFloat() / (count - 1) else 0f
-                    val isSecondShot = bmpB != null && f >= count / 2
-                    val activeBmp = if (isSecondShot) bmpB!! else bmpA
-                    val shotIndex = if (isSecondShot) sIdx + 3 else sIdx
-                    val isHighEnergy = slab.voice_emotion.lowercase() in setOf("hook", "climax", "excited") ||
-                        slab.sfx_cue.lowercase() in setOf("boom", "sword", "thunder")
-                    val easeT = ((1.0 - kotlin.math.cos(tNorm * Math.PI)) * 0.5).toFloat()
+                val isCustomVideoScene = slab.customMediaUri.isNotBlank() && slab.customMediaType == "video"
+                val customRetriever: MediaMetadataRetriever? = if (isCustomVideoScene) {
+                    runCatching {
+                        MediaMetadataRetriever().apply {
+                            setDataSource(context, Uri.parse(slab.customMediaUri))
+                        }
+                    }.getOrNull()
+                } else null
+                val customClipDurUs = customRetriever?.let { r ->
+                    val durMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 4000L
+                    max(250_000L, durMs * 1000L)
+                } ?: 4_000_000L
+                var cachedClipFrame: Bitmap? = null
+                var cachedBucket = -1L
 
-                    val canvas: Canvas = inputSurface.lockCanvas(null)
-                    try {
-                        canvas.drawColor(Color.BLACK)
-                        val zoom = when {
-                            isHighEnergy && shotIndex % 2 == 0 -> 1.04f + 0.14f * easeT
-                            shotIndex % 6 == 0 -> 1.02f + 0.12f * easeT
-                            shotIndex % 6 == 1 -> 1.15f - 0.11f * easeT
-                            else -> 1.09f + 0.03f * easeT
-                        }
-                        var panX = when (shotIndex % 6) {
-                            2 -> (easeT - 0.5f) * width * 0.06f
-                            3 -> (0.5f - easeT) * width * 0.06f
-                            else -> 0f
-                        }
-                        var panY = when (shotIndex % 6) {
-                            4 -> (0.5f - easeT) * height * 0.045f
-                            5 -> (easeT - 0.5f) * height * 0.045f
-                            else -> 0f
-                        }
-                        if (isHighEnergy) {
-                            panX += (kotlin.math.sin(f * 0.42) * 3.5).toFloat()
-                            panY += (kotlin.math.cos(f * 0.35) * 2.5).toFloat()
-                        }
-                        matrix.reset()
-                        matrix.postScale(zoom, zoom, width * 0.5f, height * 0.5f)
-                        matrix.postTranslate(panX, panY)
-                        canvas.drawBitmap(activeBmp, matrix, drawPaint)
+                try {
+                    for (f in 0 until count) {
+                        coroutineContext.ensureActive()
+                        val tNorm = if (count > 1) f.toFloat() / (count - 1) else 0f
+                        val switchFrame = (count / 2).coerceAtLeast(10)
+                        val flipBlendFrames = 8
+                        val isSecondShot = !isCustomVideoScene && bmpB != null && f >= switchFrame
+                        val videoFrameBmp: Bitmap? = if (customRetriever != null) {
+                            val timeUs = ((f.toLong() * 1_000_000L) / FPS) % customClipDurUs
+                            val bucket = timeUs / 80_000L
+                            if (bucket != cachedBucket || cachedClipFrame == null) {
+                                val rawFrame = runCatching {
+                                    customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                }.getOrNull()
+                                if (rawFrame != null) {
+                                    val fitted = ImageComposer.composeStudioBitmapFromRealPhoto(context, rawFrame, width, height)
+                                    rawFrame.recycle()
+                                    cachedClipFrame?.recycle()
+                                    cachedClipFrame = fitted
+                                    cachedBucket = bucket
+                                }
+                            }
+                            cachedClipFrame
+                        } else null
+                        val activeBmp = videoFrameBmp ?: if (isSecondShot) bmpB!! else bmpA
+                        val shotIndex = if (isSecondShot) sIdx + 3 else sIdx
+                        val isHighEnergy = slab.voice_emotion.lowercase() in setOf("hook", "climax", "excited") ||
+                            slab.sfx_cue.lowercase() in setOf("boom", "sword", "thunder")
+                        val easeT = ((1.0 - kotlin.math.cos(tNorm * Math.PI)) * 0.5).toFloat()
 
-                        if (prevBmp != null && f < crossfadeFrames) {
-                            val alpha = ((1f - (f.toFloat() / crossfadeFrames)) * 255f).roundToInt().coerceIn(0, 255)
-                            crossfadePaint.alpha = alpha
-                            canvas.drawBitmap(prevBmp, 0f, 0f, crossfadePaint)
+                        val canvas: Canvas = inputSurface.lockCanvas(null)
+                        try {
+                            canvas.drawColor(Color.BLACK)
+                            if (videoFrameBmp != null) {
+                                canvas.drawBitmap(activeBmp, 0f, 0f, drawPaint)
+                            } else {
+                                val applyShotMatrix = { targetShotIdx: Int, localEase: Float, extraX: Float ->
+                                    val zoom = when {
+                                        isHighEnergy && targetShotIdx % 2 == 0 -> 1.04f + 0.14f * localEase
+                                        targetShotIdx % 6 == 0 -> 1.03f + 0.13f * localEase
+                                        targetShotIdx % 6 == 1 -> 1.16f - 0.12f * localEase
+                                        else -> 1.10f + 0.04f * kotlin.math.sin(localEase * Math.PI).toFloat()
+                                    }
+                                    var panX = when (targetShotIdx % 6) {
+                                        2 -> (localEase - 0.5f) * width * 0.06f
+                                        3 -> (0.5f - localEase) * width * 0.06f
+                                        else -> 0f
+                                    } + extraX
+                                    var panY = when (targetShotIdx % 6) {
+                                        4 -> (0.5f - localEase) * height * 0.045f
+                                        5 -> (localEase - 0.5f) * height * 0.045f
+                                        else -> 0f
+                                    }
+                                    if (isHighEnergy) {
+                                        panX += (kotlin.math.sin(f * 0.36) * 2.5).toFloat()
+                                        panY += (kotlin.math.cos(f * 0.30) * 2.0).toFloat()
+                                    }
+                                    val swayDeg = (kotlin.math.sin(localEase * Math.PI * 2.0) * 0.38).toFloat()
+                                    matrix.reset()
+                                    matrix.postScale(zoom, zoom, width * 0.5f, height * 0.5f)
+                                    matrix.postRotate(swayDeg, width * 0.5f, height * 0.5f)
+                                    matrix.postTranslate(panX, panY)
+                                }
+
+                                if (isSecondShot && f < switchFrame + flipBlendFrames) {
+                                    val blendP = ((f - switchFrame + 1).toFloat() / flipBlendFrames).coerceIn(0f, 1f)
+                                    val slideOffset = (1f - blendP) * width * 0.14f * (if (sIdx % 2 == 0) 1f else -1f)
+                                    applyShotMatrix(sIdx, easeT, 0f)
+                                    canvas.drawBitmap(bmpA, matrix, drawPaint)
+                                    applyShotMatrix(shotIndex, easeT, slideOffset)
+                                    crossfadePaint.alpha = (blendP * 255f).roundToInt().coerceIn(0, 255)
+                                    canvas.drawBitmap(bmpB!!, matrix, crossfadePaint)
+                                } else {
+                                    applyShotMatrix(shotIndex, easeT, 0f)
+                                    canvas.drawBitmap(activeBmp, matrix, drawPaint)
+                                }
+                            }
+
+                            if (prevBmp != null && f < crossfadeFrames) {
+                                val alpha = ((1f - (f.toFloat() / crossfadeFrames)) * 255f).roundToInt().coerceIn(0, 255)
+                                crossfadePaint.alpha = alpha
+                                canvas.drawBitmap(prevBmp, 0f, 0f, crossfadePaint)
+                            }
+
+                            ImageComposer.drawWatermarkOverlay(canvas, width, height, isShorts)
+                            if (slab.stat_badge.isNotBlank()) {
+                                ImageComposer.drawStatBadgeOverlay(canvas, slab.stat_badge, width, isShorts)
+                            }
+                            val activeCaption = if (part2Text.isNotEmpty() && f >= count / 2) part2Text else part1Text
+                            ImageComposer.drawPopCaptionOverlay(canvas, activeCaption, width, height, isShorts)
+                            if (isLastScene && f >= (count * 0.45f).roundToInt()) {
+                                ImageComposer.drawSubscribeEndCard(canvas, width, height, isShorts)
+                            }
+                        } finally {
+                            inputSurface.unlockCanvasAndPost(canvas)
                         }
 
-                        ImageComposer.drawWatermarkOverlay(canvas, width, height, isShorts)
-                        if (slab.stat_badge.isNotBlank()) {
-                            ImageComposer.drawStatBadgeOverlay(canvas, slab.stat_badge, width, isShorts)
+                        frameCounter++
+                        drainVideo(false)
+                        stepAudioEncoder(false)
+                        if (frameCounter % 12 == 0 && totalFrames > 0) {
+                            onProgress((frameCounter * 100 / totalFrames).coerceIn(0, 99))
                         }
-                        val activeCaption = if (part2Text.isNotEmpty() && f >= count / 2) part2Text else part1Text
-                        ImageComposer.drawPopCaptionOverlay(canvas, activeCaption, width, height, isShorts)
-                        if (isLastScene && f >= (count * 0.45f).roundToInt()) {
-                            ImageComposer.drawSubscribeEndCard(canvas, width, height, isShorts)
-                        }
-                    } finally {
-                        inputSurface.unlockCanvasAndPost(canvas)
                     }
-
-                    frameCounter++
-                    drainVideo(false)
-                    stepAudioEncoder(false)
-                    if (frameCounter % 12 == 0 && totalFrames > 0) {
-                        onProgress((frameCounter * 100 / totalFrames).coerceIn(0, 99))
-                    }
+                } finally {
+                    cachedClipFrame?.recycle()
+                    runCatching { customRetriever?.release() }
                 }
             }
 

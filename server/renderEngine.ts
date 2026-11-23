@@ -24,6 +24,7 @@ import {
 } from './imageComposer.ts';
 import {
   resolveLanguageVoice,
+  type ContentMode,
   type InputMode,
   type RenderStatusResponse,
   type VideoLanguageKey,
@@ -41,6 +42,8 @@ import {
   generateImageForSlab,
   generateScript,
   isNonCelebrityOrRecipeTopic,
+  resolveEffectiveVisualStyle,
+  resolveEffectiveVoiceTone,
 } from './videoRepository.ts';
 
 const SHORTS_WIDTH = 1080;
@@ -121,16 +124,24 @@ export function cancelRenderJob(jobId: string): RenderStatusResponse | null {
   return job.state;
 }
 
+export interface CustomSceneMediaFile {
+  path: string;
+  mimetype: string;
+  originalname: string;
+}
+
 export interface StartRenderParams {
   topic: string;
   isShorts: boolean;
   customBgmPath?: string | null;
+  customSceneMedia?: Record<string, CustomSceneMediaFile>;
   preGeneratedScript?: VideoScriptResponse | null;
   language: VideoLanguageKey;
   voiceGender: VoiceGender;
   voiceTone: VoiceTone;
   inputMode: InputMode;
   visualStyle?: VisualStyleMode;
+  contentMode?: ContentMode;
 }
 
 export function startRenderJob(params: StartRenderParams): string {
@@ -165,6 +176,17 @@ export function startRenderJob(params: StartRenderParams): string {
         fs.unlinkSync(params.customBgmPath);
       } catch {
         // ignore
+      }
+    }
+    if (params.customSceneMedia) {
+      for (const m of Object.values(params.customSceneMedia)) {
+        if (m?.path && fs.existsSync(m.path)) {
+          try {
+            fs.unlinkSync(m.path);
+          } catch {
+            // ignore
+          }
+        }
       }
     }
     if (abortController.signal.aborted) {
@@ -221,6 +243,10 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
   const height = params.isShorts ? SHORTS_HEIGHT : LANDSCAPE_HEIGHT;
   const renderDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `video-render-${job.jobId}-`));
 
+  const activeContentMode: ContentMode = params.contentMode ?? 'AUTO';
+  const effectiveVoiceTone = resolveEffectiveVoiceTone(params.voiceTone, activeContentMode);
+  const effectiveVisualStyle = resolveEffectiveVisualStyle(params.visualStyle ?? 'AUTO', activeContentMode);
+
   try {
     let script: VideoScriptResponse;
     if (params.preGeneratedScript && params.preGeneratedScript.slabs.length > 0) {
@@ -236,6 +262,7 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         inputMode: params.inputMode,
         voiceTone: params.voiceTone,
         visualStyle: params.visualStyle ?? 'AUTO',
+        contentMode: activeContentMode,
       });
     }
     checkCancelled();
@@ -263,7 +290,7 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
           renderDirectory,
           slabs: script.slabs,
           voiceGender: params.voiceGender,
-          voiceTone: params.voiceTone,
+          voiceTone: effectiveVoiceTone,
           language: params.language,
           runFfmpegFn: (args) => runFfmpeg(job, args),
         });
@@ -280,7 +307,7 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         script.slabs,
         activeVoiceName,
         params.voiceGender,
-        params.voiceTone
+        effectiveVoiceTone
       );
     }
     checkCancelled();
@@ -362,8 +389,10 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         params.isShorts
       );
 
-      const activeVisualStyleMode: VisualStyleMode = params.visualStyle ?? 'AUTO';
+      const activeVisualStyleMode: VisualStyleMode = effectiveVisualStyle;
       const isStylizedStoryMode = activeVisualStyleMode === 'PIXAR_3D' || activeVisualStyleMode === 'ANIME_3D';
+      const isStrictAiStoryMode =
+        activeContentMode === 'STORY' || activeContentMode === 'KIDS_STORY' || activeContentMode === 'COOKING';
       const is3dVividStyle =
         isStylizedStoryMode ||
         ['3d', 'pixar', 'disney', 'cgi', 'anime', 'cartoon'].some((k) =>
@@ -373,12 +402,59 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         ['hook', 'climax', 'excited'].includes(slab.voice_emotion.toLowerCase()) ||
         ['boom', 'sword', 'thunder'].includes(slab.sfx_cue.toLowerCase());
 
+      const custom1 = params.customSceneMedia?.[`${index}_1`];
+      const custom2 = params.customSceneMedia?.[`${index}_2`];
+      const isCustomVideo1 = Boolean(
+        custom1 &&
+          fs.existsSync(custom1.path) &&
+          (custom1.mimetype.startsWith('video/') ||
+            /\.(mp4|mov|webm|mkv|m4v|avi)$/i.test(custom1.originalname || custom1.path))
+      );
+      const customImagePath1 =
+        custom1 && !isCustomVideo1 && fs.existsSync(custom1.path) ? custom1.path : undefined;
+      const isCustomVideo2 = Boolean(
+        custom2 &&
+          fs.existsSync(custom2.path) &&
+          (custom2.mimetype.startsWith('video/') ||
+            /\.(mp4|mov|webm|mkv|m4v|avi)$/i.test(custom2.originalname || custom2.path))
+      );
+      const customImagePath2 =
+        custom2 && !isCustomVideo2 && fs.existsSync(custom2.path) ? custom2.path : undefined;
+
       const isVideoClip =
+        !custom1 &&
         !isStylizedStoryMode &&
+        !isStrictAiStoryMode &&
         (slab.visual_source.toLowerCase() === 'video_clip' || slab.visual_source.toLowerCase() === 'meme_clip');
 
       let encodedClip = false;
-      if (isVideoClip && slab.real_photo_query.trim()) {
+      if (isCustomVideo1 && custom1) {
+        updateProgress(Math.max(14, Math.min(82, baseProgress)), `Using custom clip for scene ${index + 1}…`);
+        if (index === 0 && !coverBaseImageFile) {
+          const rawCover = path.join(renderDirectory, 'cover_raw_custom_clip.png');
+          const gotCover = await runFfmpeg(job, ['-y', '-ss', '0.25', '-i', custom1.path, '-vframes', '1', rawCover])
+            .then(() => fs.existsSync(rawCover) && fs.statSync(rawCover).size > 2048)
+            .catch(() => false);
+          if (gotCover) coverBaseImageFile = rawCover;
+        }
+        const renderProgress = 14 + Math.round(((index + 0.5) * 68) / slabCount);
+        updateProgress(Math.max(14, Math.min(82, renderProgress)), `Editing custom clip scene ${index + 1} of ${slabCount}…`);
+        encodedClip = await runFfmpeg(
+          job,
+          createVideoClipSegmentArguments(
+            custom1.path,
+            overlaySpecs,
+            videoSegmentFile,
+            width,
+            height,
+            encodeFrames,
+            index,
+            slabCount
+          )
+        )
+          .then(() => fs.existsSync(videoSegmentFile) && fs.statSync(videoSegmentFile).size > 2048)
+          .catch(() => false);
+      } else if (isVideoClip && slab.real_photo_query.trim()) {
         const clipLabel =
           slab.visual_source.toLowerCase() === 'meme_clip'
             ? `Fetching internet meme (${slab.real_photo_query})…`
@@ -437,25 +513,34 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         const layoutMode = (slab.layout_mode || 'single').toLowerCase().trim();
         const isSplitLayout = layoutMode === 'split';
         const hasSecondPrompt =
+          Boolean(customImagePath2) ||
           slab.image_prompt_2.trim().length > 0 ||
           (!isStylizedStoryMode &&
+            !isStrictAiStoryMode &&
             slab.visual_source_2.toLowerCase() === 'real_photo' &&
             slab.real_photo_query_2.trim().length > 0);
         const useSplitDimensions = isSplitLayout && hasSecondPrompt;
-        const panelWidth = useSplitDimensions && height >= width ? Math.floor(width / 2) - 3 : width;
+        const panelWidth = useSplitDimensions && height <= width ? Math.floor(width / 2) - 3 : width;
         const panelHeight = useSplitDimensions && height > width ? Math.floor(height / 2) - 3 : height;
         const panelIsShorts = panelHeight > panelWidth;
 
         const imageFile1 = await resolveSceneImageFile({
           renderDirectory,
           tag: `${index + 1}_1`,
-          visualSource: isStylizedStoryMode ? 'ai_generated' : isVideoClip ? 'real_photo' : slab.visual_source,
-          realQuery: isStylizedStoryMode ? '' : slab.real_photo_query,
+          visualSource:
+            isStylizedStoryMode || isStrictAiStoryMode
+              ? 'ai_generated'
+              : isVideoClip
+              ? 'real_photo'
+              : slab.visual_source,
+          realQuery: isStylizedStoryMode || isStrictAiStoryMode ? '' : slab.real_photo_query,
           scenePrompt: slab.image_prompt,
           voiceoverText: slab.voiceover_text,
           characterBible: script.character_bible,
           visualStyle: script.visual_style,
           visualStyleMode: activeVisualStyleMode,
+          contentMode: activeContentMode,
+          customImagePath: customImagePath1,
           topicContext,
           hasCharacter: slab.has_character,
           isShorts: useSplitDimensions ? panelIsShorts : params.isShorts,
@@ -481,13 +566,18 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
           const imageFile2 = await resolveSceneImageFile({
             renderDirectory,
             tag: `${index + 1}_2`,
-            visualSource: isStylizedStoryMode ? 'ai_generated' : slab.visual_source_2 || 'ai_generated',
-            realQuery: isStylizedStoryMode ? '' : slab.real_photo_query_2,
+            visualSource:
+              isStylizedStoryMode || isStrictAiStoryMode
+                ? 'ai_generated'
+                : slab.visual_source_2 || 'ai_generated',
+            realQuery: isStylizedStoryMode || isStrictAiStoryMode ? '' : slab.real_photo_query_2,
             scenePrompt: slab.image_prompt_2 || slab.image_prompt,
             voiceoverText: slab.voiceover_text,
             characterBible: script.character_bible,
             visualStyle: script.visual_style,
             visualStyleMode: activeVisualStyleMode,
+            contentMode: activeContentMode,
+            customImagePath: customImagePath2,
             topicContext,
             hasCharacter: slab.has_character,
             isShorts: useSplitDimensions ? panel2Height > panel2Width : params.isShorts,
@@ -648,6 +738,17 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
         fs.unlinkSync(params.customBgmPath);
       } catch {
         // ignore
+      }
+    }
+    if (params.customSceneMedia) {
+      for (const m of Object.values(params.customSceneMedia)) {
+        if (m?.path && fs.existsSync(m.path)) {
+          try {
+            fs.unlinkSync(m.path);
+          } catch {
+            // ignore
+          }
+        }
       }
     }
     fs.rmSync(renderDirectory, { recursive: true, force: true });
@@ -1085,6 +1186,8 @@ async function resolveSceneImageFile(opts: {
   characterBible: string;
   visualStyle: string;
   visualStyleMode?: VisualStyleMode;
+  contentMode?: ContentMode;
+  customImagePath?: string;
   topicContext: string;
   hasCharacter: boolean;
   isShorts: boolean;
@@ -1098,8 +1201,24 @@ async function resolveSceneImageFile(opts: {
   slabCount: number;
 }): Promise<string> {
   const imageFile = path.join(opts.renderDirectory, `slab_${opts.tag}.png`);
+  if (opts.customImagePath && fs.existsSync(opts.customImagePath)) {
+    opts.progressUpdate(`Using custom image for scene ${opts.sceneIndex + 1}…`);
+    const customOk =
+      (await composeStudioFrameFromRealPhoto(opts.customImagePath, imageFile, opts.width, opts.height).catch(
+        () => false
+      )) && !(await isMostlyBlackOrCorrupt(imageFile));
+    if (customOk) {
+      return imageFile;
+    }
+  }
+
+  const contentMode: ContentMode = opts.contentMode ?? 'AUTO';
+  const isStrictAiMode = contentMode === 'STORY' || contentMode === 'KIDS_STORY' || contentMode === 'COOKING';
   const forcedStylized = opts.visualStyleMode === 'PIXAR_3D' || opts.visualStyleMode === 'ANIME_3D';
-  const preferAi = forcedStylized || isNonCelebrityOrRecipeTopic(opts.realQuery.trim() || opts.scenePrompt, opts.topicContext);
+  const preferAi =
+    forcedStylized ||
+    isStrictAiMode ||
+    isNonCelebrityOrRecipeTopic(opts.realQuery.trim() || opts.scenePrompt, opts.topicContext);
   const wantsRealPhoto = !preferAi && opts.visualSource.toLowerCase() === 'real_photo' && opts.realQuery.trim().length > 0;
 
   if (wantsRealPhoto) {
@@ -1132,15 +1251,24 @@ async function resolveSceneImageFile(opts: {
     opts.visualStyleMode
   );
 
-  const primaryOk = await tryGenerateImageWithTimeout(primaryPrompt, opts.isShorts, opts.seed, imageFile, opts.usedHashes);
+  const primaryOk = await tryGenerateImageWithTimeout(
+    primaryPrompt,
+    opts.isShorts,
+    opts.seed,
+    imageFile,
+    opts.usedHashes,
+    contentMode
+  );
   if (primaryOk) {
     return imageFile;
   }
 
   const safeSceneTopic = sanitizePromptText(opts.scenePrompt).slice(0, 140);
-  const is3d = ['3d', 'pixar', 'disney', 'cartoon', 'anime'].some(
-    (k) => opts.scenePrompt.toLowerCase().includes(k) || opts.visualStyle.toLowerCase().includes(k)
-  );
+  const is3d =
+    contentMode === 'KIDS_STORY' ||
+    ['3d', 'pixar', 'disney', 'cartoon', 'anime'].some(
+      (k) => opts.scenePrompt.toLowerCase().includes(k) || opts.visualStyle.toLowerCase().includes(k)
+    );
   const safePrompt = safeSceneTopic
     ? is3d
       ? `3D Pixar Disney animated scene, ${safeSceneTopic}, vibrant sunlight, rich detail`
@@ -1149,7 +1277,14 @@ async function resolveSceneImageFile(opts: {
     ? '3D Pixar Disney cartoon animation, vibrant sunny storybook meadow with soft sunlight'
     : 'dramatic 35mm live-action film photograph, rich warm cinematic lighting, sharp focus';
 
-  const retryOk = await tryGenerateImageWithTimeout(safePrompt, opts.isShorts, opts.seed + 101, imageFile, opts.usedHashes);
+  const retryOk = await tryGenerateImageWithTimeout(
+    safePrompt,
+    opts.isShorts,
+    opts.seed + 101,
+    imageFile,
+    opts.usedHashes,
+    contentMode
+  );
   if (retryOk) {
     return imageFile;
   }
@@ -1185,11 +1320,12 @@ async function tryGenerateImageWithTimeout(
   isShorts: boolean,
   seed: number,
   outFile: string,
-  usedHashes?: Set<string>
+  usedHashes?: Set<string>,
+  contentMode: ContentMode = 'AUTO'
 ): Promise<boolean> {
   try {
     const buf = await Promise.race([
-      generateImageForSlab(prompt, isShorts, seed),
+      generateImageForSlab(prompt, isShorts, seed, contentMode),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Image generation timed out')), IMAGE_GEN_TIMEOUT_MS)
       ),
@@ -1302,46 +1438,48 @@ function buildMotionAndGradeFilter(
   isHighEnergy = false
 ): string {
   const denom = Math.max(1, frames - 1);
-  const upWidth = Math.floor((width * 3) / 2);
-  const upHeight = Math.floor((height * 3) / 2);
+  const upWidth = Math.floor(width * 2.2);
+  const upHeight = Math.floor(height * 2.2);
+  const ease = `0.5*(1-cos(PI*on/${denom}))`;
+  const arc = `sin(PI*on/${denom})`;
 
   let motionFilter: string;
   if (isHighEnergy && sceneIndex % 2 === 0) {
-    // Dynamic 2.5D action push with subtle handheld camera float for hook/climax beats
-    motionFilter = `zoompan=z='if(lte(on,6),1.06+0.12*(on/6),min(zoom+0.0022,1.26))':x='iw/2-(iw/zoom/2)+3.5*sin(on*0.42)':y='ih/2-(ih/zoom/2)+2.5*cos(on*0.35)':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+    // Dynamic 2.5D action punch-in + smooth floating drift for hook/climax beats
+    motionFilter = `zoompan=z='1.03+0.15*(1-exp(-on*0.20))+0.04*(on/${denom})':x='(iw-iw/zoom)*(0.5+0.04*sin(on*0.28))':y='(ih-ih/zoom)*(0.5+0.03*cos(on*0.24))':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
   } else {
     switch (sceneIndex % 8) {
       case 0:
-        motionFilter = `zoompan=z='if(lte(on,8),1.0+0.12*(on/8),min(zoom+0.0018,1.25))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)-0.08*(ih-ih/zoom)*(on/${denom})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.02+0.16*${ease}':x='(iw-iw/zoom)*(0.5+0.08*${arc})':y='(ih-ih/zoom)*(0.52-0.14*(on/${denom}))':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 1:
-        motionFilter = `zoompan=z='if(lte(on,8),1.26-0.12*(on/8),max(1.0,zoom-0.0018))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.20-0.16*${ease}':x='(iw-iw/zoom)*0.5':y='(ih-ih/zoom)*(0.45+0.08*${arc})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 2:
-        motionFilter = `zoompan=z='1.22':x='(iw-iw/zoom)*on/${denom}':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.12+0.06*${arc}':x='(iw-iw/zoom)*${ease}':y='(ih-ih/zoom)*(0.5-0.06*${arc})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 3:
-        motionFilter = `zoompan=z='1.22':x='(iw-iw/zoom)*(1-on/${denom})':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.14+0.05*${arc}':x='(iw-iw/zoom)*(1-${ease})':y='(ih-ih/zoom)*(0.5+0.06*${arc})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 4:
-        motionFilter = `zoompan=z='1.20':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(1-on/${denom})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.14+0.04*${ease}':x='(iw-iw/zoom)*(0.5-0.05*${arc})':y='(ih-ih/zoom)*(1-${ease})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 5:
-        motionFilter = `zoompan=z='1.20':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*on/${denom}':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.12+0.06*${ease}':x='(iw-iw/zoom)*(0.5+0.05*${arc})':y='(ih-ih/zoom)*${ease}':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       case 6:
-        motionFilter = `zoompan=z='min(zoom+0.0020,1.24)':x='(iw-iw/zoom)*on/${denom}':y='(ih-ih/zoom)*(0.7-0.4*on/${denom})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.05+0.15*${ease}':x='(iw-iw/zoom)*${ease}':y='(ih-ih/zoom)*(0.68-0.36*${ease})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
       default:
-        motionFilter = `zoompan=z='min(zoom+0.0022,1.24)':x='(iw-iw/zoom)*(1-on/${denom})':y='(ih-ih/zoom)*0.32':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
+        motionFilter = `zoompan=z='1.19-0.14*${ease}':x='(iw-iw/zoom)*(1-${ease})':y='(ih-ih/zoom)*(0.32+0.34*${ease})':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
         break;
     }
   }
 
   const baseGrade = is3dVivid
-    ? 'eq=contrast=1.09:saturation=1.18:brightness=0.02,unsharp=3:3:0.42,vignette=PI/7'
-    : 'eq=contrast=1.07:saturation=1.12:brightness=0.01,unsharp=3:3:0.35,vignette=PI/6';
-  return `scale=${upWidth}:${upHeight}:force_original_aspect_ratio=increase,crop=${upWidth}:${upHeight},setsar=1,${motionFilter},${baseGrade}`;
+    ? 'eq=contrast=1.10:saturation=1.20:brightness=0.02,unsharp=5:5:0.46,vignette=PI/7'
+    : 'eq=contrast=1.08:saturation=1.13:brightness=0.01,unsharp=3:3:0.38,vignette=PI/6';
+  return `scale=${upWidth}:${upHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${upWidth}:${upHeight},setsar=1,${motionFilter},${baseGrade}`;
 }
 
 function appendOverlayChain(
@@ -1430,17 +1568,37 @@ function createFlipVideoSegmentArguments(
   isHighEnergy = false
 ): string[] {
   const frames = Math.max(MIN_SCENE_FRAMES, segmentFrames);
-  const motionShot1 = buildMotionAndGradeFilter(sceneIndex, width, height, frames, is3dVivid, isHighEnergy);
-  const motionShot2 = buildMotionAndGradeFilter(sceneIndex + 3, width, height, frames, is3dVivid, true);
   const edgeFades = buildEdgeFades(sceneIndex, totalScenes, frames);
-  const switchSec = (switchBaseDurationSeconds * 0.5).toFixed(2);
+  const xfadeFrames = frames >= 36 ? 8 : 0;
 
   const args = ['-y', '-i', imageFile1, '-i', imageFile2];
-  const filterParts = [
-    `[0:v]${motionShot1}[p1]`,
-    `[1:v]${motionShot2}[p2]`,
-    `[p1][p2]overlay=0:0:enable='gte(t,${switchSec})'[flipbase]`,
-  ];
+  let filterParts: string[];
+  if (xfadeFrames > 0) {
+    const desiredSwitch = Math.round(switchBaseDurationSeconds * 0.5 * FRAME_RATE);
+    const switchFrame = Math.max(12, Math.min(frames - 12, desiredSwitch));
+    const p1Frames = switchFrame + xfadeFrames;
+    const p2Frames = frames - switchFrame;
+    const offsetSec = (switchFrame / FRAME_RATE).toFixed(3);
+    const xfadeDur = (xfadeFrames / FRAME_RATE).toFixed(3);
+    const flipTransitions = ['smoothleft', 'smoothright', 'wipeup', 'circleopen'];
+    const transition = flipTransitions[sceneIndex % flipTransitions.length];
+    const motionShot1 = buildMotionAndGradeFilter(sceneIndex, width, height, p1Frames, is3dVivid, isHighEnergy);
+    const motionShot2 = buildMotionAndGradeFilter(sceneIndex + 3, width, height, p2Frames, is3dVivid, true);
+    filterParts = [
+      `[0:v]${motionShot1}[p1]`,
+      `[1:v]${motionShot2}[p2]`,
+      `[p1][p2]xfade=transition=${transition}:duration=${xfadeDur}:offset=${offsetSec}[flipbase]`,
+    ];
+  } else {
+    const motionShot1 = buildMotionAndGradeFilter(sceneIndex, width, height, frames, is3dVivid, isHighEnergy);
+    const motionShot2 = buildMotionAndGradeFilter(sceneIndex + 3, width, height, frames, is3dVivid, true);
+    const switchSec = (switchBaseDurationSeconds * 0.5).toFixed(2);
+    filterParts = [
+      `[0:v]${motionShot1}[p1]`,
+      `[1:v]${motionShot2}[p2]`,
+      `[p1][p2]overlay=0:0:enable='gte(t,${switchSec})'[flipbase]`,
+    ];
+  }
   appendOverlayChain(args, filterParts, 'flipbase', overlaySpecs, 2, edgeFades);
 
   args.push(
@@ -1595,11 +1753,13 @@ async function runDissolveBatch(
   let currentLabel = '0:v';
   let cumulativeOffset = chunkBaseDurations[0];
 
+  const transitions = ['fade', 'smoothleft', 'dissolve', 'smoothright', 'fade'];
   for (let i = 1; i < chunkFiles.length; i++) {
     const outLabel = i === chunkFiles.length - 1 ? 'vout' : `xf_${i}`;
     const offsetStr = Math.max(0.25, cumulativeOffset).toFixed(3);
     const durStr = DISSOLVE_SECONDS.toFixed(3);
-    filterParts.push(`[${currentLabel}][${i}:v]xfade=transition=fade:duration=${durStr}:offset=${offsetStr}[${outLabel}]`);
+    const tx = transitions[(i - 1) % transitions.length];
+    filterParts.push(`[${currentLabel}][${i}:v]xfade=transition=${tx}:duration=${durStr}:offset=${offsetStr}[${outLabel}]`);
     currentLabel = outLabel;
     cumulativeOffset += chunkBaseDurations[i];
   }

@@ -1,5 +1,14 @@
 export type InputMode = 'AUTO' | 'EXACT_SCRIPT' | 'AI_PROMPT';
 
+export type ContentMode =
+  | 'AUTO'
+  | 'REVIEW'
+  | 'MOVIE_ROAST'
+  | 'REACTION'
+  | 'STORY'
+  | 'KIDS_STORY'
+  | 'COOKING';
+
 export type VoiceGender = 'MALE' | 'FEMALE';
 
 export type VoiceTone = 'AUTO' | 'NATURAL' | 'FUNNY' | 'SERIOUS' | 'ENERGETIC';

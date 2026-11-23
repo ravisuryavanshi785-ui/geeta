@@ -1,5 +1,52 @@
 export type InputMode = 'AUTO' | 'EXACT_SCRIPT' | 'AI_PROMPT';
 
+export type ContentMode =
+  | 'AUTO'
+  | 'REVIEW'
+  | 'MOVIE_ROAST'
+  | 'REACTION'
+  | 'STORY'
+  | 'KIDS_STORY'
+  | 'COOKING';
+
+export const CONTENT_MODES: Array<{ value: ContentMode; label: string; hint: string }> = [
+  {
+    value: 'AUTO',
+    label: 'Auto',
+    hint: 'Paste any script or topic — AI automatically adapts storytelling, visuals & mood.',
+  },
+  {
+    value: 'REVIEW',
+    label: 'Review',
+    hint: 'Movie or trailer name / review script — fetches cast photos, official poster & rating badges.',
+  },
+  {
+    value: 'MOVIE_ROAST',
+    label: 'Movie Roast',
+    hint: 'Movie name or roast script — punchy comedy lines, meme cuts, logic roast & fast beats.',
+  },
+  {
+    value: 'REACTION',
+    label: 'Reaction',
+    hint: 'Trailer, scene or viral clip topic — split/flip reactions, high-emotion beats & polls.',
+  },
+  {
+    value: 'STORY',
+    label: 'Story',
+    hint: 'Story idea or full kahani — locks main character face/outfit across all AI scenes with suspense.',
+  },
+  {
+    value: 'KIDS_STORY',
+    label: 'Kids Story',
+    hint: 'Kids adventure or moral bedtime story — playful warm narration with 3D Pixar storybook visuals.',
+  },
+  {
+    value: 'COOKING',
+    label: 'Cooking',
+    hint: 'Dish name or recipe steps — appetizing macro food visuals, step badges & warm kitchen vibes.',
+  },
+];
+
 export const INPUT_MODES: Array<{ value: InputMode; label: string; hint: string }> = [
   {
     value: 'AUTO',

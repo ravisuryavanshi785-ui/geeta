@@ -2,6 +2,37 @@ package com.rsmoviespot.domain.models
 
 import kotlinx.serialization.Serializable
 
+enum class ContentMode(val label: String, val hint: String) {
+    AUTO(
+        label = "Auto",
+        hint = "Paste any script or topic — AI auto-adapts story, visuals & mood."
+    ),
+    REVIEW(
+        label = "Review",
+        hint = "Movie or trailer name / review script — cast photos, official poster & rating badges."
+    ),
+    MOVIE_ROAST(
+        label = "Movie Roast",
+        hint = "Movie name or roast script — punchy comedy lines, meme cuts & logic roast."
+    ),
+    REACTION(
+        label = "Reaction",
+        hint = "Trailer or viral scene topic — split/flip reactions, high-emotion beats & polls."
+    ),
+    STORY(
+        label = "Story",
+        hint = "Story idea or full kahani — locks main character visuals across all AI scenes."
+    ),
+    KIDS_STORY(
+        label = "Kids Story",
+        hint = "Kids adventure or moral story — warm playful narration & 3D Pixar storybook visuals."
+    ),
+    COOKING(
+        label = "Cooking",
+        hint = "Dish name or recipe steps — appetizing macro food visuals & step badges."
+    )
+}
+
 enum class InputMode(val label: String, val hint: String) {
     AUTO(
         label = "Auto",
@@ -91,7 +122,11 @@ data class VideoSlab(
     val visual_source_2: String = "",
     val real_photo_query_2: String = "",
     val image_prompt_2: String = "",
-    val stat_badge: String = ""
+    val stat_badge: String = "",
+    val customMediaUri: String = "",
+    val customMediaType: String = "",
+    val customMediaUri2: String = "",
+    val customMediaType2: String = ""
 )
 
 @Serializable
@@ -109,6 +144,7 @@ data class VideoScriptResponse(
 
 data class MainUiState(
     val topic: String = "",
+    val contentMode: ContentMode = ContentMode.AUTO,
     val inputMode: InputMode = InputMode.AUTO,
     val isShorts: Boolean = true,
     val selectedLanguage: VideoLanguage = VideoLanguage.AUTO,

@@ -2,6 +2,7 @@ package com.rsmoviespot.data.api.repository
 
 import android.util.Base64
 import com.rsmoviespot.BuildConfig
+import com.rsmoviespot.domain.models.ContentMode
 import com.rsmoviespot.domain.models.InputMode
 import com.rsmoviespot.domain.models.VideoLanguage
 import com.rsmoviespot.domain.models.VideoScriptResponse
@@ -91,11 +92,12 @@ class VideoRepository(
                 "- STRICT ENGLISH-ONLY RULE FOR PROMPTS & QUERIES: NEVER put Hindi/Devanagari/regional words inside image_prompt, image_prompt_2, real_photo_query, or real_photo_query_2! Transliterate every person/movie name into English. NEVER prompt calendars, split-screen, UI icons, streaming icons, meters, gauges, scorecards, bold text, cards, or rating numbers inside image_prompt — put ratings/dates in stat_badge instead!\n\n"
 
         private const val VOICE_AND_BGM_RULES =
-            "VOICE EMOTION, BGM & YOUTUBE METADATA RULES:\n" +
+            "VOICE EMOTION, BGM & CHANNEL GROWTH METADATA RULES:\n" +
+                "- CHANNEL GROWTH HOOK & RETENTION STRUCTURE: Always craft an explosive 2-second curiosity/shock Hook in Scene 1 (voice_emotion='hook'), a mid-video retention twist/open loop around Scene 5-7, and an interactive debate question CTA in the finale!\n" +
                 "- Pick bgm_mood: 'comedy_roast', 'epic_action', 'suspense_thriller', 'emotional_sad', 'devotional', 'sci_fi_tech', 'motivational', or 'horror_dark'.\n" +
                 "- For each scene, match voice_emotion dynamically from: 'hook', 'excited', 'climax', 'suspense', 'sad', 'roast', 'question', 'warm', or 'normal'.\n" +
                 "- Pick valid Edge TTS voice_name (e.g. hi-IN-MadhurNeural, hi-IN-SwaraNeural, en-IN-PrabhatNeural, en-US-AndrewNeural).\n" +
-                "- Also generate youtube_title (<75 chars), youtube_description (2-3 lines), youtube_hashtags, and pinned_comment.\n\n"
+                "- Also generate high-CTR youtube_title (<62 chars + 1 emoji), SEO youtube_description (2-3 lines), 5-7 youtube_hashtags, and engaging poll/debate pinned_comment.\n\n"
 
         private const val JSON_SCHEMA_SPEC =
             "Return ONLY ONE valid JSON object (no markdown fences, no commentary) matching this schema:\n" +
@@ -253,7 +255,64 @@ class VideoRepository(
         }
     }
 
-    private fun buildVisualStyleDirective(visualStyle: VisualStyleMode): String = when (visualStyle) {
+    fun resolveEffectiveVoiceTone(voiceTone: VoiceTone, contentMode: ContentMode = ContentMode.AUTO): VoiceTone {
+        if (voiceTone != VoiceTone.AUTO) return voiceTone
+        return when (contentMode) {
+            ContentMode.MOVIE_ROAST -> VoiceTone.FUNNY
+            ContentMode.REACTION, ContentMode.REVIEW -> VoiceTone.ENERGETIC
+            ContentMode.STORY -> VoiceTone.SERIOUS
+            ContentMode.KIDS_STORY, ContentMode.COOKING -> VoiceTone.NATURAL
+            ContentMode.AUTO -> VoiceTone.AUTO
+        }
+    }
+
+    fun resolveEffectiveVisualStyle(visualStyle: VisualStyleMode, contentMode: ContentMode = ContentMode.AUTO): VisualStyleMode {
+        if (visualStyle != VisualStyleMode.AUTO) return visualStyle
+        return if (contentMode == ContentMode.KIDS_STORY) VisualStyleMode.PIXAR_3D else VisualStyleMode.AUTO
+    }
+
+    private fun buildContentModeDirective(contentMode: ContentMode): String = when (contentMode) {
+        ContentMode.REVIEW -> """
+            CONTENT MODE ACTIVE — MOVIE / TRAILER REVIEW:
+            - Structure: 2s curiosity hook -> spoiler-free setup -> cast, director & music breakdown -> star/hype verdict + audience poll CTA.
+            - VISUALS: Mandatory real_photo (or layout_mode='flip' for pairs like Director+Movie Poster or Lead duo) for named real celebrities & official movie posters.
+            - BADGES & BGM: Star/hype stat_badge on verdict scene (e.g. '4/5 STARS', '8/10 HYPE').
+        """.trimIndent()
+        ContentMode.MOVIE_ROAST -> """
+            CONTENT MODE ACTIVE — FUNNY MOVIE ROAST:
+            - Structure: Sharp playful Hinglish/Hindi comedy! Roast logic holes & dramatic tropes using punchy 6-10 word cuts.
+            - VISUALS: Mix actor/movie real_photo with 2-4 funny meme_clip GIFs and comedic AI scenes.
+            - BADGES & BGM: Witty punch stat_badge cues ('LOGIC RIP', 'WAIT WHAT?', '100% CRINGE'). Set bgm_mood='comedy_roast' and voice_emotion 'roast'/'hook'.
+        """.trimIndent()
+        ContentMode.REACTION -> """
+            CONTENT MODE ACTIVE — CREATOR / AUDIENCE REACTION:
+            - Structure: First-person creator reaction ('Bhai ruko! Yahan kya notice kiya?', 'Goosebumps!') + closing debate poll.
+            - VISUALS: Use layout_mode='split' or 'flip' on 3-5 scenes pairing movie/topic subject on Panel 1 with expressive reaction/meme on Panel 2.
+            - BADGES & BGM: Crisp reaction stat_badge ('MIND BLOWN', 'WAIT FOR IT', 'GOOSEBUMPS').
+        """.trimIndent()
+        ContentMode.STORY -> """
+            CONTENT MODE ACTIVE — CINEMATIC STORYTELLING (KAHANI):
+            - Structure: High-retention arc — Scene 1 hook -> Hero & world -> Conflict -> Mid-video twist -> Climax & takeaway.
+            - VISUALS: STRICTLY visual_source='ai_generated' (real_photo_query='') across ALL scenes! Lock character_bible across every has_character=true scene and vary camera angles.
+            - BADGES & BGM: Minimal stat_badge ('' or chapter cue like 'THE TWIST'). Use suspense_thriller / emotional_sad / horror_dark bgm_mood.
+        """.trimIndent()
+        ContentMode.KIDS_STORY -> """
+            CONTENT MODE ACTIVE — KIDS MORAL / BEDTIME STORY:
+            - Structure: Simple warm playful storytelling (cute animals, magic, friendship) ending with a clear 'Moral of the Story'!
+            - CONTENT SAFETY MANDATORY: ZERO horror, ZERO gore, ZERO violence, ZERO scary monsters — keep every scene joyful and safe.
+            - VISUALS: STRICTLY visual_source='ai_generated' (zero real_photo/clips!). Bright 3D Pixar Disney storybook animation aesthetic, cute characters locked via character_bible.
+            - BADGES & BGM: Clean captions (stat_badge='' or 'MORAL TIME!'). Set bgm_mood='motivational' and voice_emotion 'warm'/'excited'.
+        """.trimIndent()
+        ContentMode.COOKING -> """
+            CONTENT MODE ACTIVE — COOKING / RECIPE SHORTS:
+            - Structure: 2s food hook ('Sirf 10 min me restaurant jaisa...') -> Ingredients -> Step-by-step tadka -> Secret tip -> Final sizzling plating.
+            - VISUALS: STRICTLY visual_source='ai_generated' (zero real_photo/clips!) and has_character=false on food closeups! Macro DSLR food photography prompts (steam, golden spices, warm lighting).
+            - BADGES & BGM: Step stat_badge cues ('STEP 1', 'STEP 2', 'SECRET TIP', 'READY!'). Set bgm_mood='motivational'.
+        """.trimIndent()
+        ContentMode.AUTO -> ""
+    }
+
+    private fun buildVisualStyleDirective(visualStyle: VisualStyleMode, contentMode: ContentMode = ContentMode.AUTO): String = when (resolveEffectiveVisualStyle(visualStyle, contentMode)) {
         VisualStyleMode.PIXAR_3D -> """
             VISUAL MEDIUM MANDATORY — 3D PIXAR ANIMATED STORY FILM:
             - Set visual_style to '3D Pixar Disney animated feature film, stylized CGI characters, rich global illumination, soft volumetric sunlight'.
@@ -281,7 +340,8 @@ class VideoRepository(
         voiceGender: VoiceGender,
         inputMode: InputMode,
         voiceTone: VoiceTone,
-        visualStyle: VisualStyleMode = VisualStyleMode.AUTO
+        visualStyle: VisualStyleMode = VisualStyleMode.AUTO,
+        contentMode: ContentMode = ContentMode.AUTO
     ): VideoScriptResponse = withContext(Dispatchers.IO) {
         val cleanInput = topic.trim()
         require(cleanInput.isNotEmpty()) { "Topic must not be blank." }
@@ -298,10 +358,13 @@ class VideoRepository(
             InputMode.AUTO -> words.size > FULL_SCRIPT_WORD_THRESHOLD && !isInstructionOrBriefPrompt(cleanInput, language)
         }
 
+        val effectiveTone = resolveEffectiveVoiceTone(voiceTone, contentMode)
+        val effectiveStyle = resolveEffectiveVisualStyle(visualStyle, contentMode)
         val systemPrompt = if (isFullScriptMode) FULL_SCRIPT_SYSTEM_PROMPT else TOPIC_SYSTEM_PROMPT
         val genderLabel = if (voiceGender == VoiceGender.FEMALE) "Female" else "Male"
-        val toneDirective = buildVoiceToneDirective(voiceTone)
-        val styleDirective = buildVisualStyleDirective(visualStyle)
+        val toneDirective = buildVoiceToneDirective(effectiveTone)
+        val styleDirective = buildVisualStyleDirective(effectiveStyle, contentMode)
+        val modeDirective = buildContentModeDirective(contentMode)
 
         val languageDirective = if (language == VideoLanguage.AUTO) {
             "Language: Auto-detect from user request. Default to spoken Hindi (Devanagari) with voice_name '${VideoLanguage.HINDI.resolveVoice(voiceGender)}', UNLESS user explicitly requested another language."
@@ -313,8 +376,9 @@ class VideoRepository(
             buildString {
                 appendLine("MODE: FULL USER SCRIPT (${words.size} words).")
                 appendLine("DO NOT rewrite, paraphrase, translate, add, or change a single word. Keep the EXACT user text intact and split sequentially into 11 to 16 scenes (6-14 words each). Merge 1-3 word hooks like 'रुको!' with the next sentence and split 20+ word cast sentences into separate beats.")
+                if (modeDirective.isNotBlank()) appendLine(modeDirective)
                 appendLine(styleDirective)
-                appendLine("CAST & POSTERS: Whenever ANY real actor/director/singer is named (and style is not 3D/Anime), visual_source MUST be 'real_photo' with ONLY their clean English full name (NEVER ai_generated for real people!). Use layout_mode='flip' + visual_source_2='real_photo' when TWO actors OR director+movie appear in one scene.")
+                appendLine("CAST & POSTERS: Whenever ANY real actor/director/singer is named (and style is not 3D/Anime and Content Mode is not STORY/KIDS_STORY/COOKING), visual_source MUST be 'real_photo' with ONLY their clean English full name (NEVER ai_generated for real people!). Use layout_mode='flip' + visual_source_2='real_photo' when TWO actors OR director+movie appear in one scene.")
                 appendLine("100% ASCII ENGLISH: NEVER leave Hindi/Devanagari words or calendars, split-screen, UI icons, gauge/meter/card/text descriptions inside image_prompt or real_photo_query!")
                 appendLine("Set voice_name matching language and $genderLabel gender.")
                 appendLine("Voice delivery style: $toneDirective")
@@ -328,12 +392,13 @@ class VideoRepository(
                 appendLine("MODE: TOPIC / DIRECTOR PROMPT MODE (${words.size} words). ACT ON EVERY INSTRUCTION BELOW:")
                 appendLine(cleanInput)
                 appendLine()
+                if (modeDirective.isNotBlank()) appendLine(modeDirective)
                 appendLine(styleDirective)
                 appendLine()
                 appendLine(languageDirective)
                 appendLine("Voice delivery & writing tone: $toneDirective")
                 appendLine(
-                    if (isShorts) "Format guideline: Vertical 9:16 YouTube Shorts, 13 to 16 fast-paced scenes (~45-50s total)."
+                    if (isShorts) "Format guideline: Vertical 9:16 YouTube Shorts, 13 to 16 fast-paced scenes (~45-50s total) with a 2s Hook, mid-video twist, and comment CTA."
                     else "Format guideline: Horizontal 16:9 YouTube video, 14 to 18 scenes (~65-80s total)."
                 )
                 appendLine("Return ONLY ONE complete valid JSON object.")
@@ -648,23 +713,40 @@ class VideoRepository(
         return out.toString()
     }
 
-    suspend fun generateImageForSlab(prompt: String, isShorts: Boolean, seed: Int): ByteArray =
-        generateImageForSlabWithMeta(prompt, isShorts, seed).bytes
+    suspend fun generateImageForSlab(
+        prompt: String,
+        isShorts: Boolean,
+        seed: Int,
+        contentMode: ContentMode = ContentMode.AUTO
+    ): ByteArray = generateImageForSlabWithMeta(prompt, isShorts, seed, contentMode).bytes
 
     suspend fun generateImageForSlabWithMeta(
         prompt: String,
         isShorts: Boolean,
-        seed: Int
+        seed: Int,
+        contentMode: ContentMode = ContentMode.AUTO
     ): GeneratedImageResult = withContext(Dispatchers.IO) {
         val accountId = BuildConfig.CLOUDFLARE_ACCOUNT_ID.trim()
         val apiToken = BuildConfig.CLOUDFLARE_API_TOKEN.trim()
         val width = if (isShorts) SHORTS_IMAGE_WIDTH else LANDSCAPE_IMAGE_WIDTH
         val height = if (isShorts) SHORTS_IMAGE_HEIGHT else LANDSCAPE_IMAGE_HEIGHT
         val cleanPrompt = prompt.trim().trimEnd(',', '.')
-        val finalPrompt = cleanPrompt + buildImageSuffix(cleanPrompt.lowercase(Locale.US), isShorts)
+        val modePromptBoost = if (
+            contentMode == ContentMode.COOKING &&
+            !Regex("\\b(food photography|macro|kitchen|steam|plating)\\b", RegexOption.IGNORE_CASE).containsMatchIn(cleanPrompt)
+        ) {
+            "$cleanPrompt, appetizing macro food photography, warm kitchen studio lighting, fresh garnish"
+        } else {
+            cleanPrompt
+        }
+        val finalPrompt = modePromptBoost + buildImageSuffix(modePromptBoost.lowercase(Locale.US), isShorts)
 
         val errors = mutableListOf<String>()
         if (accountId.isNotEmpty() && apiToken.isNotEmpty() && System.currentTimeMillis() >= cloudflareExhaustedUntilMs) {
+            val isCfTerminal = { e: Throwable ->
+                val code = (e as? HttpStatusException)?.statusCode
+                code == 401 || code == 403 || code == 429
+            }
             try {
                 val bytes = executeCloudflareWithRetry {
                     val body = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -680,8 +762,8 @@ class VideoRepository(
                 }
                 return@withContext GeneratedImageResult(bytes, fromPollinations = false)
             } catch (e: Throwable) {
-                if ((e as? HttpStatusException)?.statusCode == 429) {
-                    cloudflareExhaustedUntilMs = System.currentTimeMillis() + 5 * 60_000L
+                if (isCfTerminal(e)) {
+                    cloudflareExhaustedUntilMs = System.currentTimeMillis() + 10 * 60_000L
                 }
                 errors.add("flux-2-klein-9b: ${e.message?.take(100)}")
             }
@@ -701,8 +783,8 @@ class VideoRepository(
                     }
                     return@withContext GeneratedImageResult(bytes, fromPollinations = false)
                 } catch (e: Throwable) {
-                    if ((e as? HttpStatusException)?.statusCode == 429) {
-                        cloudflareExhaustedUntilMs = System.currentTimeMillis() + 5 * 60_000L
+                    if (isCfTerminal(e)) {
+                        cloudflareExhaustedUntilMs = System.currentTimeMillis() + 10 * 60_000L
                     }
                     errors.add("lucid-origin: ${e.message?.take(100)}")
                 }
@@ -722,50 +804,62 @@ class VideoRepository(
                     }
                     return@withContext GeneratedImageResult(bytes, fromPollinations = false)
                 } catch (e: Throwable) {
-                    if ((e as? HttpStatusException)?.statusCode == 429) {
-                        cloudflareExhaustedUntilMs = System.currentTimeMillis() + 5 * 60_000L
+                    if (isCfTerminal(e)) {
+                        cloudflareExhaustedUntilMs = System.currentTimeMillis() + 10 * 60_000L
                     }
                     errors.add("flux-1-schnell: ${e.message?.take(100)}")
                 }
             }
         }
 
-        // Tier 2: AI Horde (free, watermark-free; stays within <=5.0 anonymous KudosUpfront cap)
-        val promptLower = cleanPrompt.lowercase(Locale.US)
-        val is3dPrompt = listOf("3d", "pixar", "disney", "cgi", "dreamworks", "blender").any { it in promptLower }
+        // Tier 2: AI Horde (free, watermark-free; smart live queue-aware model routing)
+        val promptLower = modePromptBoost.lowercase(Locale.US)
+        val is3dPrompt = contentMode == ContentMode.KIDS_STORY ||
+            listOf("3d", "pixar", "disney", "cgi", "dreamworks", "blender").any { it in promptLower }
         val isAnimePrompt = !is3dPrompt && listOf("anime", "manga", "cel-shaded", "ghibli", "shonen").any { it in promptLower }
         val hordeTag = when {
-            is3dPrompt -> ", 3D Pixar Disney CGI animation render, volumetric lighting, rich 3D depth, sharp focus"
-            isAnimePrompt -> ", anime film frame, Makoto Shinkai cinematic lighting, crisp cel shading, sharp focus"
-            else -> ", photorealistic, crisp 35mm photography, sharp focus, cinematic lighting"
+            is3dPrompt -> ", 3D Pixar Disney CGI animation render, volumetric lighting, rich 3D depth, crisp detail, vibrant colors"
+            isAnimePrompt -> ", anime film frame, Makoto Shinkai cinematic lighting, crisp cel shading, high detail"
+            contentMode == ContentMode.COOKING -> ", appetizing macro DSLR food photography, warm kitchen studio lighting, sharp focus"
+            else -> ", photorealistic, crisp 35mm cinema photography, sharp focus, dramatic lighting"
         }
         val hordeTagShort = when {
             is3dPrompt -> ", 3D Pixar CGI animated frame"
             isAnimePrompt -> ", anime cinematic frame"
             else -> ", cinematic photograph"
         }
-        val hordeNegativePrompt =
-            "text, words, letters, typography, numbers, digits, watermark, signature, logo, banner, ui overlay, chart, gauge, meter, cards, collage, grid, split screen, deformed face, ugly face, distorted eyes, bad anatomy, extra fingers, mutated hands, blurry, lowres, worst quality"
-        val hordeModels = if (isAnimePrompt) {
-            listOf("Counterfeit", "Anything Diffusion", "Nova Anime XL", "Animagine XL")
+        val baseNegative =
+            "text, words, letters, typography, numbers, digits, watermark, signature, logo, banner, ui overlay, chart, gauge, meter, cards, collage, grid, split screen, deformed face, ugly face, distorted eyes, bad anatomy, extra fingers, mutated hands, blurry, lowres, worst quality, out of focus"
+        val hordeNegativePrompt = if (contentMode == ContentMode.KIDS_STORY) {
+            "$baseNegative, scary, horror, blood, gore, dark violence, creepy, nightmare, weapon"
         } else {
-            listOf("Deliberate 3.0", "Deliberate", "AbsoluteReality")
+            baseNegative
         }
+        val hordeStyle = when {
+            is3dPrompt -> "3d"
+            isAnimePrompt -> "anime"
+            else -> "photo"
+        }
+        val rankedHordeModels = runCatching { resolveFastAiHordeModels(hordeStyle) }
+            .getOrElse { getFallbackHordeModels(hordeStyle) }
+        val primaryModels = rankedHordeModels.take(3)
+        val backupModels = if (rankedHordeModels.size > 3) rankedHordeModels.drop(3).take(3)
+            else getFallbackHordeModels(hordeStyle)
 
-        val hordeWidth = if (isShorts) 448 else 576
-        val hordeHeight = if (isShorts) 576 else 448
-        val hordePrompt = "${cleanPrompt.take(320)}$hordeTag ### $hordeNegativePrompt"
-        val hordeFallbackPrompt = "${cleanPrompt.take(200)}$hordeTagShort ### $hordeNegativePrompt"
+        val hordeWidth = if (isShorts) 448 else 640
+        val hordeHeight = if (isShorts) 704 else 384
+        val hordePrompt = "${modePromptBoost.take(360)}$hordeTag ### $hordeNegativePrompt"
+        val hordeFallbackPrompt = "${modePromptBoost.take(220)}$hordeTagShort ### $hordeNegativePrompt"
         val hordeBytes = runCatching {
-            generateViaAiHorde(hordePrompt, hordeWidth, hordeHeight, 14, seed, hordeModels)
+            generateViaAiHorde(hordePrompt, hordeWidth, hordeHeight, 16, seed, primaryModels)
         }.getOrNull() ?: runCatching {
             generateViaAiHorde(
                 hordeFallbackPrompt,
-                if (isShorts) 384 else 512,
-                if (isShorts) 512 else 384,
-                12,
+                if (isShorts) 448 else 576,
+                if (isShorts) 576 else 448,
+                14,
                 seed + 13,
-                null
+                backupModels
             )
         }.getOrNull()
         if (hordeBytes != null) {
@@ -790,6 +884,77 @@ class VideoRepository(
         }
 
         error("Image generation failed: ${errors.joinToString(" | ")}")
+    }
+
+    @Volatile private var cachedHordeModelsAtMs = 0L
+    @Volatile private var cachedHordeModelsList: List<Triple<String, Int, Int>> = emptyList()
+
+    private fun getFallbackHordeModels(style: String): List<String> = when (style) {
+        "3d" -> listOf("Rev Animated", "DreamShaper", "3D Animation Diffusion", "AlbedoBase XL (SDXL)", "Anything Diffusion")
+        "anime" -> listOf("Flat-2D Animerge", "Nova Anime XL", "MeinaMix", "Counterfeit", "Anything Diffusion")
+        else -> listOf("Edge Of Realism", "Rev Animated", "Deliberate", "AbsoluteReality", "Analog Madness")
+    }
+
+    private fun resolveFastAiHordeModels(style: String): List<String> {
+        val preferredPool = when (style) {
+            "3d" -> listOf("Rev Animated", "3D Animation Diffusion", "DreamShaper", "Disney Pixar Cartoon", "AlbedoBase XL (SDXL)", "Flat-2D Animerge", "Anything Diffusion", "Deliberate")
+            "anime" -> listOf("Nova Anime XL", "Flat-2D Animerge", "MeinaMix", "Counterfeit", "Anything Diffusion", "Abyss OrangeMix", "Animagine XL", "Rev Animated")
+            else -> listOf("Edge Of Realism", "EpicRealism", "AbsoluteReality", "Realistic Vision", "Analog Madness", "Deliberate", "AlbedoBase XL (SDXL)", "Rev Animated")
+        }
+
+        val now = System.currentTimeMillis()
+        if (now - cachedHordeModelsAtMs > 60_000L || cachedHordeModelsList.isEmpty()) {
+            val req = Request.Builder()
+                .url("https://aihorde.net/api/v2/status/models?type=image")
+                .header("Accept", "application/json")
+                .header("Client-Agent", "RSMovieSpot:1.0:rsmoviespot@app.local")
+                .build()
+            runCatching {
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val arr = json.parseToJsonElement(res.body?.string().orEmpty()).jsonArray
+                        val parsed = arr.mapNotNull { el ->
+                            val obj = el.jsonObject
+                            val name = obj.str("name")
+                            val count = obj["count"]?.jsonPrimitive?.intOrNull ?: 0
+                            val eta = obj["eta"]?.jsonPrimitive?.intOrNull ?: 999
+                            if (name.isNotBlank() && count >= 1 && name != "stable_diffusion") Triple(name, count, eta) else null
+                        }
+                        if (parsed.isNotEmpty()) {
+                            cachedHordeModelsList = parsed
+                            cachedHordeModelsAtMs = now
+                        }
+                    }
+                }
+            }
+        }
+
+        val liveList = cachedHordeModelsList
+        if (liveList.isEmpty()) return getFallbackHordeModels(style)
+
+        val scored = mutableListOf<Pair<String, Int>>()
+        preferredPool.forEachIndexed { idx, candidate ->
+            val live = liveList.firstOrNull { it.first.equals(candidate, ignoreCase = true) } ?: return@forEachIndexed
+            val (_, count, eta) = live
+            val fastBonus = when {
+                eta <= 15 -> 400
+                eta <= 35 -> 250
+                eta <= 75 -> 90
+                else -> -250
+            }
+            val styleBonus = (preferredPool.size - idx) * 18
+            val workerBonus = minOf(40, count * 6)
+            scored.add(live.first to (fastBonus + styleBonus + workerBonus - eta))
+        }
+        scored.sortByDescending { it.second }
+        if (scored.isNotEmpty()) return scored.map { it.first }
+
+        val fastAny = liveList
+            .filter { (name, _, eta) -> eta <= 45 && !Regex("nsfw|hentai|furry|pony|pixel", RegexOption.IGNORE_CASE).containsMatchIn(name) }
+            .sortedBy { it.third }
+            .take(4)
+            .map { it.first }
+        return if (fastAny.isNotEmpty()) fastAny else getFallbackHordeModels(style)
     }
 
     private suspend fun generateViaAiHorde(
@@ -859,8 +1024,8 @@ class VideoRepository(
         }
         if (genId.isBlank()) return null
 
-        for (poll in 0 until 28) {
-            delay(2500L)
+        for (poll in 0 until 22) {
+            delay(2000L)
             val checkReq = Request.Builder()
                 .url("https://aihorde.net/api/v2/generate/check/$genId")
                 .header("Accept", "application/json")
@@ -876,6 +1041,10 @@ class VideoRepository(
 
             if (checkObj["faulted"]?.jsonPrimitive?.booleanOrNull == true) return null
             if (checkObj["is_possible"]?.jsonPrimitive?.booleanOrNull == false) return null
+            val processing = checkObj["processing"]?.jsonPrimitive?.intOrNull ?: 0
+            val queuePos = checkObj["queue_position"]?.jsonPrimitive?.intOrNull ?: 0
+            val waitSec = checkObj["wait_time"]?.jsonPrimitive?.intOrNull ?: 0
+            if (poll >= 2 && processing == 0 && queuePos > 35 && waitSec > 75) return null
             if (checkObj["done"]?.jsonPrimitive?.booleanOrNull == true) {
                 val statusReq = Request.Builder()
                     .url("https://aihorde.net/api/v2/generate/status/$genId")
