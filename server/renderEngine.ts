@@ -325,7 +325,12 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
     await runFfmpeg(job, ['-y', '-f', 'concat', '-safe', '0', '-i', voiceListFile, '-c', 'copy', fullVoiceFile]);
     checkCancelled();
 
-    const sceneDurations = trimmedVoiceWavs.map((wav) => Math.max(0.8, getPcmWavDurationSeconds(wav) + 0.12));
+    // Compensate for xfade dissolve overlap so each scene stays strictly synced to its audio duration
+    const sceneDurations = trimmedVoiceWavs.map((wav, idx) => {
+      const voiceDur = Math.max(0.9, getPcmWavDurationSeconds(wav));
+      const dissolveCompensation = idx < trimmedVoiceWavs.length - 1 ? DISSOLVE_SECONDS : 0;
+      return voiceDur + 0.18 + dissolveCompensation;
+    });
     sceneDurations[sceneDurations.length - 1] += AUDIO_TAIL_PADDING_SECONDS;
 
     const sceneFramesList = sceneDurations.map((dur) =>
@@ -852,8 +857,7 @@ async function synthesizeAndTrimVoiceClips(
     const { rawMp3, usedFallback } = rawClips[i];
     const pass1Wav = path.join(renderDirectory, `voice_pass1_${i + 1}.wav`);
     const trimmedWav = path.join(renderDirectory, `voice_part_${i + 1}.wav`);
-    const wordCount = slabs[i].voiceover_text.trim().split(/\s+/).filter(Boolean).length;
-    const microBreath = 0.16; // 160ms trailing silence pad
+    const microBreath = 0.16;
     const emotion = slabs[i].voice_emotion;
 
     const pass1Filter = buildPass1VoiceFilter(usedFallback, voiceGender, emotion, microBreath);
@@ -882,17 +886,15 @@ async function synthesizeAndTrimVoiceClips(
       await runFfmpeg(job, ['-y', '-i', rawMp3, '-ar', '44100', '-ac', '1', '-c:a', 'pcm_s16le', pass1Wav]);
     }
 
+    // Pad clean lead-in and tail without aggressive silenceremove so soft words never get clipped
     let pass2Ok = false;
     try {
-      const pass1Dur = fs.existsSync(pass1Wav) ? getPcmWavDurationSeconds(pass1Wav) : 0;
       await runFfmpeg(job, [
         '-y',
         '-i',
         pass1Wav,
         '-af',
-        // Trim ONLY leading and trailing dead silence (via areverse) so mid-sentence comma pauses are preserved intact,
-        // then pad 150ms start and 160ms end.
-        `silenceremove=start_periods=1:start_duration=0.02:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_duration=0.02:start_threshold=-50dB,areverse,adelay=150:all=1,apad=pad_dur=0.16`,
+        'adelay=120:all=1,apad=pad_dur=0.22',
         '-ar',
         '44100',
         '-ac',
@@ -901,9 +903,7 @@ async function synthesizeAndTrimVoiceClips(
         'pcm_s16le',
         trimmedWav,
       ]);
-      const dur = fs.existsSync(trimmedWav) ? getPcmWavDurationSeconds(trimmedWav) : 0;
-      const minExpectedDur = Math.max(wordCount > 3 ? 0.8 : 0.45, pass1Dur * 0.55);
-      pass2Ok = fs.existsSync(trimmedWav) && fs.statSync(trimmedWav).size > 44 && dur >= minExpectedDur;
+      pass2Ok = fs.existsSync(trimmedWav) && fs.statSync(trimmedWav).size > 44;
     } catch {
       pass2Ok = false;
     }
@@ -1367,11 +1367,40 @@ async function tryGenerateImageWithTimeout(
     if (head.startsWith('{') || head.startsWith('<')) return false;
     const corrupt = await isMostlyBlackOrCorrupt(outFile);
     if (corrupt) return false;
+    const isCensored = await isGrayscaleCensoredImage(outFile);
+    if (isCensored) return false;
     if (usedHashes) usedHashes.add(hash);
     return true;
   } catch {
     return false;
   }
+}
+
+async function isGrayscaleCensoredImage(imgPath: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const proc = spawn('ffmpeg', [
+      '-i',
+      imgPath,
+      '-vf',
+      'signalstats,metadata=print:file=-',
+      '-f',
+      'null',
+      '-',
+    ]);
+    let out = '';
+    proc.stdout?.on('data', (d: Buffer) => (out += d.toString('utf8')));
+    proc.stderr?.on('data', (d: Buffer) => (out += d.toString('utf8')));
+    proc.on('close', () => {
+      const m = /lavfi\.signalstats\.SATAVG=([0-9.]+)/.exec(out);
+      if (m) {
+        const satAvg = parseFloat(m[1]);
+        resolve(satAvg < 6.0);
+        return;
+      }
+      resolve(false);
+    });
+    proc.on('error', () => resolve(false));
+  });
 }
 
 function buildStockFallbackQuery(realQuery: string, scenePrompt: string, voiceoverText: string): string {
@@ -1421,6 +1450,7 @@ function sanitizePromptText(raw: string): string {
     .replace(/\bblood rivers?\b|\brivers of blood\b/gi, 'dramatic crimson-lit action showdown with flying sparks')
     .replace(/\bbox[- ]?office\b/gi, 'cheering packed cinema hall')
     .replace(/\bunreal engine(?:\s*5)?\b/gi, 'cinema film still')
+    .replace(/\b(raw\s+meat|raw\s+chicken|hot\s+oil|boiling|bloody|nude|nsfw|sexy|bikini|lingerie|kill|murder|dead\s+body)\b/gi, 'vibrant cinematic plated dish')
     .replace(/\babstract\b/gi, 'detailed scene')
     .replace(/\s{2,}/g, ' ')
     .replace(/^[, .]+|[, .]+$/g, '');
@@ -1474,7 +1504,6 @@ function buildMotionAndGradeFilter(
 
   let motionFilter: string;
   if (isHighEnergy && sceneIndex % 2 === 0) {
-    // Dynamic 2.5D action punch-in + smooth floating drift for hook/climax beats
     motionFilter = `zoompan=z='1.03+0.15*(1-exp(-on*0.20))+0.04*(on/${denom})':x='(iw-iw/zoom)*(0.5+0.04*sin(on*0.28))':y='(ih-ih/zoom)*(0.5+0.03*cos(on*0.24))':d=${frames}:s=${width}x${height}:fps=${FRAME_RATE}`;
   } else {
     switch (sceneIndex % 8) {
