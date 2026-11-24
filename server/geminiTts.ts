@@ -16,8 +16,8 @@ export interface WhisperWordTimestamp {
   end: number;
 }
 
-const GEMINI_PRIMARY_TTS_MODEL = 'gemini-3.8-flash-tts';
-const GEMINI_FALLBACK_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
+const GEMINI_PRIMARY_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
+const GEMINI_FALLBACK_TTS_MODEL = 'gemini-3.8-flash-tts';
 const SAMPLE_RATE = 44100;
 
 function getGeminiClient(): GoogleGenAI | null {
@@ -191,31 +191,27 @@ export async function generateOneTicketGeminiAudio(params: {
   }> = [
     {
       model: GEMINI_PRIMARY_TTS_MODEL,
-      apiVersion: 'v1beta',
       parts: partsWithMetadata,
       useSpeechConfig: true,
     },
     {
       model: GEMINI_FALLBACK_TTS_MODEL,
-      apiVersion: 'v1beta',
       parts: partsWithMetadata,
-      useSpeechConfig: true,
-    },
-    {
-      model: 'gemini-2.5-flash-preview-tts',
-      apiVersion: 'v1beta',
-      parts: [{ text: combinedTextOnly }],
       useSpeechConfig: true,
     },
     {
       model: GEMINI_PRIMARY_TTS_MODEL,
       apiVersion: 'v1beta',
+      parts: partsWithMetadata,
+      useSpeechConfig: true,
+    },
+    {
+      model: GEMINI_PRIMARY_TTS_MODEL,
       parts: [{ text: combinedTextOnly }],
       useSpeechConfig: true,
     },
     {
       model: GEMINI_FALLBACK_TTS_MODEL,
-      apiVersion: 'v1beta',
       parts: [{ text: combinedTextOnly }],
       useSpeechConfig: false,
     },
@@ -514,10 +510,15 @@ export async function synthesizeOneTicketGeminiVoiceClips(params: {
   const whisperProbeMp3 = path.join(params.renderDirectory, 'gemini_whisper_probe.mp3');
 
   fs.writeFileSync(rawGeminiWav, wavBuffer);
+  const isRiffWav =
+    wavBuffer.length >= 12 &&
+    wavBuffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    wavBuffer.subarray(8, 12).toString('ascii') === 'WAVE';
 
-  // Decode 24kHz unary WAV -> studio broadcast-mastered 44.1kHz mono PCM + trim only outer dead air
+  // Decode 24kHz unary WAV (or raw L16 PCM fallback) -> studio broadcast-mastered 44.1kHz mono PCM
   await params.runFfmpegFn([
     '-y',
+    ...(isRiffWav ? [] : ['-f', 's16le', '-ar', '24000', '-ac', '1']),
     '-i',
     rawGeminiWav,
     '-af',

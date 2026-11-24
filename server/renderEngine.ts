@@ -295,10 +295,14 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
           runFfmpegFn: (args) => runFfmpeg(job, args),
         });
         trimmedVoiceWavs = geminiRes.wavFiles;
-      } catch {
+      } catch (err) {
         trimmedVoiceWavs = null;
-        updateProgress(8, 'Switching to fallback voice engine…');
+        const reason = err instanceof Error ? err.message : 'unavailable';
+        console.warn('[GeminiTTS] Fallback to Edge TTS:', reason);
+        updateProgress(8, 'Gemini TTS failed, switching to Edge TTS fallback…');
       }
+    } else {
+      updateProgress(8, 'Gemini API key not set on server, using Edge TTS…');
     }
     if (!trimmedVoiceWavs || trimmedVoiceWavs.length !== script.slabs.length) {
       trimmedVoiceWavs = await synthesizeAndTrimVoiceClips(
@@ -437,8 +441,14 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
             .catch(() => false);
           if (gotCover) coverBaseImageFile = rawCover;
         }
+        const isClean3dClip = /^scene_3d_/i.test(custom1.originalname || '');
         const renderProgress = 14 + Math.round(((index + 0.5) * 68) / slabCount);
-        updateProgress(Math.max(14, Math.min(82, renderProgress)), `Editing custom clip scene ${index + 1} of ${slabCount}…`);
+        updateProgress(
+          Math.max(14, Math.min(82, renderProgress)),
+          isClean3dClip
+            ? `Compositing 3D Character Scene ${index + 1} of ${slabCount}…`
+            : `Editing custom clip scene ${index + 1} of ${slabCount}…`
+        );
         encodedClip = await runFfmpeg(
           job,
           createVideoClipSegmentArguments(
@@ -449,11 +459,30 @@ async function runRenderPipeline(job: RenderJob, params: StartRenderParams): Pro
             height,
             encodeFrames,
             index,
-            slabCount
+            slabCount,
+            isClean3dClip
           )
         )
           .then(() => fs.existsSync(videoSegmentFile) && fs.statSync(videoSegmentFile).size > 2048)
           .catch(() => false);
+        if (!encodedClip) {
+          encodedClip = await runFfmpeg(
+            job,
+            createVideoClipSegmentArguments(
+              custom1.path,
+              overlaySpecs,
+              videoSegmentFile,
+              width,
+              height,
+              encodeFrames,
+              index,
+              slabCount,
+              true
+            )
+          )
+            .then(() => fs.existsSync(videoSegmentFile) && fs.statSync(videoSegmentFile).size > 2048)
+            .catch(() => false);
+        }
       } else if (isVideoClip && slab.real_photo_query.trim()) {
         const clipLabel =
           slab.visual_source.toLowerCase() === 'meme_clip'
@@ -1634,7 +1663,8 @@ function createVideoClipSegmentArguments(
   height: number,
   frames: number,
   sceneIndex: number,
-  totalScenes: number
+  totalScenes: number,
+  clean3dClip = false
 ): string[] {
   const safeFrames = Math.max(MIN_SCENE_FRAMES, frames);
   let blurW = Math.max(32, Math.floor(width / 16));
@@ -1647,12 +1677,16 @@ function createVideoClipSegmentArguments(
     "crop='if(gt(iw,ih),trunc(iw*0.90/2)*2,trunc(iw*0.95/2)*2)':'if(gt(iw,ih),trunc(ih*0.86/2)*2,trunc(ih*0.92/2)*2)':'(iw-ow)/2':'(ih-oh)/2'";
 
   const args = ['-y', '-stream_loop', '-1', '-i', clipFile];
-  const filterParts = [
-    `[0:v]fps=${FRAME_RATE},setsar=1,${safeCrop},split=2[bgsrc][fgsrc]`,
-    `[bgsrc]scale=${blurW}:${blurH}:force_original_aspect_ratio=increase,crop=${blurW}:${blurH},scale=${width}:${height}:flags=bilinear,eq=brightness=-0.20:saturation=0.85[bg0]`,
-    `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2[fg]`,
-    `[bg0][fg]overlay=(W-w)/2:(H-h)/2,eq=contrast=1.07:saturation=1.12,unsharp=3:3:0.30,vignette=PI/6[clipbase]`,
-  ];
+  const filterParts = clean3dClip
+    ? [
+        `[0:v]fps=${FRAME_RATE},format=yuv420p,setsar=1,scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},eq=contrast=1.06:saturation=1.10,unsharp=5:5:0.45:5:5:0.0[clipbase]`,
+      ]
+    : [
+        `[0:v]fps=${FRAME_RATE},format=yuv420p,setsar=1,${safeCrop},split=2[bgsrc][fgsrc]`,
+        `[bgsrc]scale=${blurW}:${blurH}:force_original_aspect_ratio=increase,crop=${blurW}:${blurH},scale=${width}:${height}:flags=bilinear,eq=brightness=-0.20:saturation=0.85[bg0]`,
+        `[fgsrc]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2[fg]`,
+        `[bg0][fg]overlay=(W-w)/2:(H-h)/2,eq=contrast=1.07:saturation=1.12,unsharp=3:3:0.30,vignette=PI/6[clipbase]`,
+      ];
   appendOverlayChain(args, filterParts, 'clipbase', overlaySpecs, 1, edgeFades);
 
   args.push(

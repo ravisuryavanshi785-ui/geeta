@@ -16,6 +16,20 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        val envFile = rootProject.file(".env")
+        val envGeminiLine = if (envFile.exists()) {
+            envFile.readLines().firstOrNull { it.startsWith("GEMINI_API_KEY=") }?.substringAfter("=")?.trim()?.trim('"').orEmpty()
+        } else ""
+        val hasGeminiKey = !System.getenv("GEMINI_API_KEY").isNullOrBlank() || envGeminiLine.isNotEmpty()
+        if (!hasGeminiKey) {
+            buildConfigField("String", "GEMINI_API_KEY", "\"\"")
+        }
+        buildConfigField(
+            "String",
+            "BACKEND_BASE_URL",
+            "\"https://ais-pre-26ybm6jjjs3rcaythtmmp7-231345814628.asia-southeast1.run.app\""
+        )
+
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -67,6 +81,14 @@ android {
 secrets {
     propertiesFileName = ".env"
     defaultPropertiesFileName = ".env.example"
+    val envFile = rootProject.file(".env")
+    val envGeminiLine = if (envFile.exists()) {
+        envFile.readLines().firstOrNull { it.startsWith("GEMINI_API_KEY=") }?.substringAfter("=")?.trim()?.trim('"').orEmpty()
+    } else ""
+    val hasGeminiKey = !System.getenv("GEMINI_API_KEY").isNullOrBlank() || envGeminiLine.isNotEmpty()
+    if (!hasGeminiKey) {
+        ignoreList.add("GEMINI_API_KEY")
+    }
 }
 
 dependencies {

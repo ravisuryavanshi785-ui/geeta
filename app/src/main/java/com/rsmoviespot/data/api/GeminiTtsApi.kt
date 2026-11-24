@@ -50,12 +50,13 @@ class GeminiTtsApi(
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     companion object {
-        private const val PRIMARY_MODEL = "gemini-3.8-flash-tts"
-        private const val FALLBACK_MODEL = "gemini-3.8-flash-lite-tts"
+        private const val PRIMARY_MODEL = "gemini-3.8-flash-lite-tts"
+        private const val FALLBACK_MODEL = "gemini-3.8-flash-tts"
         private const val SAMPLE_RATE = BgmSynth.SAMPLE_RATE
     }
 
-    fun isAvailable(): Boolean = BuildConfig.GEMINI_API_KEY.trim().isNotEmpty()
+    fun isAvailable(): Boolean =
+        BuildConfig.GEMINI_API_KEY.trim().isNotEmpty() || BuildConfig.BACKEND_BASE_URL.trim().isNotEmpty()
 
     fun resolveGeminiVoiceName(gender: VoiceGender, voiceTone: VoiceTone): String {
         if (gender == VoiceGender.FEMALE) {
@@ -119,11 +120,14 @@ class GeminiTtsApi(
         voiceTone: VoiceTone,
         language: VideoLanguage
     ): List<ShortArray>? = withContext(Dispatchers.IO) {
+        if (slabs.isEmpty()) return@withContext null
         val apiKey = BuildConfig.GEMINI_API_KEY.trim()
-        if (apiKey.isEmpty() || slabs.isEmpty()) return@withContext null
-
-        val wavBytes = requestOneTicketGeminiWav(apiKey, slabs, voiceGender, voiceTone, language)
-            ?: return@withContext null
+        val wavBytes = if (apiKey.isNotEmpty()) {
+            requestOneTicketGeminiWav(apiKey, slabs, voiceGender, voiceTone, language)
+                ?: requestOneTicketFromBackend(slabs, voiceGender, voiceTone, language)
+        } else {
+            requestOneTicketFromBackend(slabs, voiceGender, voiceTone, language)
+        } ?: return@withContext null
 
         val rawPcm = decodeUnaryWavTo44100MonoPcm(wavBytes)
         if (rawPcm.size < SAMPLE_RATE / 2) return@withContext null
@@ -197,7 +201,6 @@ class GeminiTtsApi(
         val attempts = listOf(
             TtsAttempt(PRIMARY_MODEL, partsWithMetadata, true),
             TtsAttempt(FALLBACK_MODEL, partsWithMetadata, true),
-            TtsAttempt("gemini-2.5-flash-preview-tts", partsTextOnly, true),
             TtsAttempt(PRIMARY_MODEL, partsTextOnly, true),
             TtsAttempt(FALLBACK_MODEL, partsTextOnly, false)
         )
@@ -257,16 +260,59 @@ class GeminiTtsApi(
         return null
     }
 
+    private fun requestOneTicketFromBackend(
+        slabs: List<VideoSlab>,
+        voiceGender: VoiceGender,
+        voiceTone: VoiceTone,
+        language: VideoLanguage
+    ): ByteArray? {
+        val baseUrl = BuildConfig.BACKEND_BASE_URL.trim().trimEnd('/')
+        if (baseUrl.isEmpty()) return null
+        val payload = buildJsonObject {
+            put("slabs", buildJsonArray {
+                slabs.forEach { slab ->
+                    add(buildJsonObject {
+                        put("voiceover_text", cleanSpokenLine(slab.voiceover_text))
+                        put("voice_emotion", slab.voice_emotion.ifBlank { "normal" })
+                    })
+                }
+            })
+            put("voiceGender", voiceGender.name)
+            put("voiceTone", voiceTone.name)
+            put("language", language.name)
+        }.toString()
+
+        val req = Request.Builder()
+            .url("$baseUrl/api/tts/one-ticket")
+            .header("Content-Type", "application/json")
+            .post(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        return runCatching {
+            client.newCall(req).execute().use { res ->
+                if (!res.isSuccessful) return@use null
+                val bodyStr = res.body?.string().orEmpty()
+                val root = json.parseToJsonElement(bodyStr).jsonObject
+                val b64 = root["audioBase64"]?.jsonPrimitive?.contentOrNull ?: return@use null
+                Base64.decode(b64, Base64.DEFAULT).takeIf { it.size > 1024 }
+            }
+        }.getOrNull()
+    }
+
     private fun decodeUnaryWavTo44100MonoPcm(wavBytes: ByteArray): ShortArray {
         if (wavBytes.size <= 44) return ShortArray(0)
         val bb = ByteBuffer.wrap(wavBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val isRiff = wavBytes.size >= 12 &&
+            String(wavBytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+            String(wavBytes, 8, 4, Charsets.US_ASCII) == "WAVE"
         var srcSampleRate = 24000
         var srcChannels = 1
         var bitsPerSample = 16
-        var dataStart = 44
-        var dataSize = wavBytes.size - 44
+        var dataStart = if (isRiff) 44 else 0
+        var dataSize = if (isRiff) wavBytes.size - 44 else wavBytes.size
 
-        var offset = 12
+        if (isRiff) {
+            var offset = 12
         while (offset + 8 <= wavBytes.size) {
             val id = String(wavBytes, offset, 4, Charsets.US_ASCII)
             val chunkSize = bb.getInt(offset + 4)
@@ -281,6 +327,7 @@ class GeminiTtsApi(
             }
             if (chunkSize < 0) break
             offset += 8 + chunkSize + (chunkSize and 1)
+        }
         }
 
         if (bitsPerSample != 16 || dataSize < 2) return ShortArray(0)

@@ -14,6 +14,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
 import com.rsmoviespot.data.api.EdgeTtsApi
 import com.rsmoviespot.data.api.GeminiTtsApi
 import com.rsmoviespot.data.api.repository.VideoRepository
@@ -147,6 +148,13 @@ class VideoRenderEngine(
             coroutineContext.ensureActive()
 
             onProgress(35, "Preparing scenes & visuals…")
+            val localCustomVideoFiles: List<File?> = script.slabs.mapIndexed { idx, slab ->
+                if (slab.customMediaUri.isNotBlank() && slab.customMediaType == "video") {
+                    copyUriToTempVideoFile(slab.customMediaUri, workDir, idx)
+                } else {
+                    null
+                }
+            }
             val topicContext = listOf(cleanTopic, script.character_bible)
                 .filter { it.isNotBlank() }
                 .joinToString(" ")
@@ -161,6 +169,7 @@ class VideoRenderEngine(
                             val done = buildSceneVisualPair(
                                 slab = slab,
                                 index = idx,
+                                localVideoFile = localCustomVideoFiles[idx],
                                 isShorts = isShorts,
                                 width = width,
                                 height = height,
@@ -243,6 +252,7 @@ class VideoRenderEngine(
                 isShorts = isShorts,
                 slabs = script.slabs,
                 sceneVisuals = sceneBitmaps,
+                localCustomVideoFiles = localCustomVideoFiles,
                 sceneFrameCounts = sceneFrameCounts,
                 mixedPcm = mixedPcm,
                 onProgress = { pct ->
@@ -365,12 +375,42 @@ class VideoRenderEngine(
         }.getOrNull()
     }
 
-    private fun extractFirstFrameFromCustomVideoUri(uriStr: String, width: Int, height: Int): Bitmap? {
+    private fun copyUriToTempVideoFile(uriStr: String, workDir: File, index: Int): File? {
         if (uriStr.isBlank()) return null
+        val target = File(workDir, "custom_clip_${index}.mp4")
+        return runCatching {
+            val uri = Uri.parse(uriStr)
+            if (uri.scheme.equals("file", ignoreCase = true) && uri.path != null) {
+                val src = File(uri.path!!)
+                if (src.exists() && src.length() > 0) {
+                    src.copyTo(target, overwrite = true)
+                    return target
+                }
+            }
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(target).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            target.takeIf { it.exists() && it.length() > 0L }
+        }.getOrNull()
+    }
+
+    private fun extractFirstFrameFromCustomVideo(uriStr: String, localVideoFile: File?, width: Int, height: Int): Bitmap? {
+        if (uriStr.isBlank() && localVideoFile == null) return null
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(context, Uri.parse(uriStr))
-            val frame = retriever.getFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            if (localVideoFile != null && localVideoFile.exists()) {
+                retriever.setDataSource(localVideoFile.absolutePath)
+            } else {
+                retriever.setDataSource(context, Uri.parse(uriStr))
+            }
+            val frame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST, width, height)
+                    ?: retriever.getFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST)
+            } else {
+                retriever.getFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST)
+            } ?: retriever.getFrameAtTime(250_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.frameAtTime
                 ?: return null
             val studio = ImageComposer.composeStudioBitmapFromRealPhoto(context, frame, width, height)
@@ -386,6 +426,7 @@ class VideoRenderEngine(
     private suspend fun buildSceneVisualPair(
         slab: VideoSlab,
         index: Int,
+        localVideoFile: File?,
         isShorts: Boolean,
         width: Int,
         height: Int,
@@ -398,7 +439,7 @@ class VideoRenderEngine(
         usedHashes: MutableSet<String>
     ): Pair<Bitmap, Bitmap?> {
         if (slab.customMediaUri.isNotBlank() && slab.customMediaType == "video") {
-            val cover = extractFirstFrameFromCustomVideoUri(slab.customMediaUri, width, height)
+            val cover = extractFirstFrameFromCustomVideo(slab.customMediaUri, localVideoFile, width, height)
                 ?: ImageComposer.createFallbackCinemaBitmap(width, height, seed)
             return cover to null
         }
@@ -766,6 +807,7 @@ class VideoRenderEngine(
         isShorts: Boolean,
         slabs: List<VideoSlab>,
         sceneVisuals: List<Pair<Bitmap, Bitmap?>>,
+        localCustomVideoFiles: List<File?>,
         sceneFrameCounts: IntArray,
         mixedPcm: ShortArray,
         onProgress: (Int) -> Unit
@@ -912,11 +954,16 @@ class VideoRenderEngine(
                 val part2Text = captionWords.drop(midWord).joinToString(" ")
                 val isLastScene = sIdx == slabs.lastIndex
 
+                val localClipFile = localCustomVideoFiles.getOrNull(sIdx)
                 val isCustomVideoScene = slab.customMediaUri.isNotBlank() && slab.customMediaType == "video"
                 val customRetriever: MediaMetadataRetriever? = if (isCustomVideoScene) {
                     runCatching {
                         MediaMetadataRetriever().apply {
-                            setDataSource(context, Uri.parse(slab.customMediaUri))
+                            if (localClipFile != null && localClipFile.exists()) {
+                                setDataSource(localClipFile.absolutePath)
+                            } else {
+                                setDataSource(context, Uri.parse(slab.customMediaUri))
+                            }
                         }
                     }.getOrNull()
                 } else null
@@ -936,10 +983,19 @@ class VideoRenderEngine(
                         val isSecondShot = !isCustomVideoScene && bmpB != null && f >= switchFrame
                         val videoFrameBmp: Bitmap? = if (customRetriever != null) {
                             val timeUs = ((f.toLong() * 1_000_000L) / FPS) % customClipDurUs
-                            val bucket = timeUs / 80_000L
+                            val bucket = f.toLong()
                             if (bucket != cachedBucket || cachedClipFrame == null) {
                                 val rawFrame = runCatching {
-                                    customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                        customRetriever.getScaledFrameAtTime(
+                                            timeUs,
+                                            MediaMetadataRetriever.OPTION_CLOSEST,
+                                            width,
+                                            height
+                                        ) ?: customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                                    } else {
+                                        customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                                    } ?: customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                                 }.getOrNull()
                                 if (rawFrame != null) {
                                     val fitted = ImageComposer.composeStudioBitmapFromRealPhoto(context, rawFrame, width, height)

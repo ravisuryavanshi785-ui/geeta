@@ -98,12 +98,28 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         }
         val mime = resolver.getType(uri).orEmpty().lowercase()
         val fileName = resolveFileName(uri).orEmpty().lowercase()
-        val isVideo = mime.startsWith("video/") ||
-            fileName.endsWith(".mp4") ||
+        val extVideo = fileName.endsWith(".mp4") ||
             fileName.endsWith(".mov") ||
             fileName.endsWith(".mkv") ||
             fileName.endsWith(".webm") ||
-            fileName.endsWith(".m4v")
+            fileName.endsWith(".m4v") ||
+            fileName.endsWith(".avi") ||
+            fileName.endsWith(".3gp")
+        val probedVideo = if (!mime.startsWith("image/") && !mime.startsWith("video/") && !extVideo) {
+            runCatching {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(getApplication<Application>(), uri)
+                    retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+                        ?.equals("yes", ignoreCase = true) == true
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            }.getOrDefault(false)
+        } else {
+            false
+        }
+        val isVideo = mime.startsWith("video/") || extVideo || probedVideo
         if (panel == 2 && isVideo) {
             _uiState.update { it.copy(statusMessage = "Panel 2 supports custom images; use Panel 1 for custom video clips.") }
             return

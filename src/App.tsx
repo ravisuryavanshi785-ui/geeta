@@ -15,8 +15,13 @@ import {
   type VoiceGender,
   type VoiceTone,
 } from './types/video';
-import { ThreeCharacterStudio } from './three/ThreeCharacterStudio';
+import {
+  ThreeCharacterStudio,
+  type ThreeCharacterStudioHandle,
+} from './three/ThreeCharacterStudio';
 import { DEFAULT_DEMO_SLABS } from './three/types';
+import { PWAInstallButton } from './pwa/PWAInstallButton';
+import { usePWAInstall } from './pwa/usePWAInstall';
 
 interface CustomSceneMediaEntry {
   file: File;
@@ -71,12 +76,19 @@ export function App() {
   const [showVideoPlayer, setShowVideoPlayer] = useState(false);
   const [showCoverModal, setShowCoverModal] = useState(false);
   const [showAndroidModal, setShowAndroidModal] = useState(false);
+  const [apkAvailable, setApkAvailable] = useState<boolean>(false);
   const [rightView, setRightView] = useState<'stage3d' | 'output'>('stage3d');
+  const [use3dInVideo, setUse3dInVideo] = useState(true);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const [toastText, setToastText] = useState<string | null>(null);
+  const { isInstallable, isInstalled, install: triggerPwaInstall } = usePWAInstall();
 
   const bgmInputRef = useRef<HTMLInputElement | null>(null);
   const sceneMediaRefs = useRef<Record<string, CustomSceneMediaEntry>>({});
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
+  const studio3dRef = useRef<ThreeCharacterStudioHandle | null>(null);
 
   const busy = isGenerating || isPreviewingScript;
 
@@ -97,6 +109,20 @@ export function App() {
     const t = setTimeout(() => setToastText(null), 2200);
     return () => clearTimeout(t);
   }, [toastText]);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/downloads/RSMovieSpot-debug.apk', { method: 'HEAD' })
+      .then((res) => {
+        if (active) setApkAvailable(res.ok);
+      })
+      .catch(() => {
+        if (active) setApkAvailable(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [showAndroidModal]);
 
   const fetchJsonWithRetry = async <T,>(
     url: string,
@@ -151,7 +177,15 @@ export function App() {
     };
     void fetch('/api/health').catch(() => {});
     document.addEventListener('visibilitychange', wakeServer);
-    return () => document.removeEventListener('visibilitychange', wakeServer);
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      document.removeEventListener('visibilitychange', wakeServer);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
   }, []);
 
   useEffect(() => {
@@ -271,7 +305,7 @@ export function App() {
   const onSceneMediaChange = (index: number, panel: 1 | 2, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|m4v|avi)$/i.test(file.name);
+    const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|m4v|avi|3gp|ogv|ts)$/i.test(file.name);
     if (panel === 2 && isVideo) {
       showToast('Panel 2 supports custom images; use Panel 1 for custom video clips');
       e.target.value = '';
@@ -392,8 +426,8 @@ export function App() {
 
     setRightView('output');
     setIsGenerating(true);
-    setProgressText('Starting video generation…');
-    setProgressPercentage(0);
+    setProgressText('Preparing scenes…');
+    setProgressPercentage(2);
     setStatusMessage('');
     setGeneratedVideoUrl(null);
     setGeneratedThumbnailUrl(null);
@@ -401,6 +435,66 @@ export function App() {
     setShowVideoPlayer(false);
 
     try {
+      let resolvedScript = draftScript;
+      if (!resolvedScript && use3dInVideo) {
+        setProgressText('Writing scenes for 3D characters…');
+        setProgressPercentage(4);
+        const { res: scriptRes, data: scriptData } = await fetchJsonWithRetry<{
+          script?: VideoScriptResponse;
+          error?: string;
+        }>('/api/script/preview', () => ({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: clean,
+            isShorts,
+            language: selectedLanguage,
+            voiceGender: selectedGender,
+            voiceTone: selectedVoiceTone,
+            visualStyle: selectedVisualStyle,
+            inputMode,
+            contentMode,
+          }),
+        }));
+        if (!scriptRes.ok || !scriptData.script) {
+          throw new Error(scriptData.error || `HTTP ${scriptRes.status}`);
+        }
+        resolvedScript = scriptData.script;
+        setDraftScript(resolvedScript);
+      }
+
+      const mergedSceneMedia: Record<string, CustomSceneMediaEntry> = { ...customSceneMedia };
+
+      if (use3dInVideo && resolvedScript && studio3dRef.current) {
+        const missing3d = resolvedScript.slabs.some((_, idx) => !mergedSceneMedia[`${idx}_1`]);
+        if (missing3d) {
+          const captured = await studio3dRef.current.captureScenesForExport(
+            resolvedScript.slabs,
+            (idx, total) => {
+              const pct = 5 + Math.round(((idx + 1) / Math.max(1, total)) * 9);
+              setProgressPercentage(pct);
+              setProgressText(`Recording 3D Character Scene ${idx + 1} of ${total}…`);
+            }
+          );
+
+          for (const { sceneIndex, file } of captured) {
+            const key = `${sceneIndex}_1`;
+            if (!mergedSceneMedia[key]) {
+              mergedSceneMedia[key] = {
+                file,
+                previewUrl: URL.createObjectURL(file),
+                isVideo: true,
+                name: file.name,
+              };
+            }
+          }
+          setCustomSceneMedia(mergedSceneMedia);
+        }
+      }
+
+      setProgressText('Starting MP4 video render…');
+      setProgressPercentage(14);
+
       const { res, data } = await fetchJsonWithRetry<{ jobId?: string; error?: string }>(
         '/api/render/start',
         () => {
@@ -413,13 +507,13 @@ export function App() {
           form.append('visualStyle', selectedVisualStyle);
           form.append('inputMode', inputMode);
           form.append('contentMode', contentMode);
-          if (draftScript) {
-            form.append('preGeneratedScript', JSON.stringify(draftScript));
+          if (resolvedScript) {
+            form.append('preGeneratedScript', JSON.stringify(resolvedScript));
           }
           if (selectedBgmFile) {
             form.append('bgmFile', selectedBgmFile);
           }
-          for (const [key, entry] of Object.entries(customSceneMedia)) {
+          for (const [key, entry] of Object.entries(mergedSceneMedia)) {
             form.append(`sceneMedia_${key}`, entry.file);
           }
           return {
@@ -563,17 +657,20 @@ export function App() {
     <div className="min-h-screen bg-[#0B0F0D] text-[#F2F7F3]">
       {/* Clean Single-Row Top Bar */}
       <header className="border-b border-white/[0.07] bg-[#0B0F0D]/90 backdrop-blur-md sticky top-0 z-30">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-6">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
           <span className="text-base sm:text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
             RS Movie Spot
           </span>
-          <button
-            type="button"
-            onClick={() => setShowAndroidModal(true)}
-            className="px-3.5 py-2 rounded-xl bg-[#151C18] border border-white/10 text-xs font-medium text-neutral-200 hover:border-[#39FF14]/60 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[38px]"
-          >
-            Android App &amp; APK
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <PWAInstallButton onOpenAndroidModal={() => setShowAndroidModal(true)} />
+            <button
+              type="button"
+              onClick={() => setShowAndroidModal(true)}
+              className="px-3.5 py-2 rounded-xl bg-[#151C18] border border-white/10 text-xs font-medium text-neutral-200 hover:border-[#39FF14]/60 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[38px]"
+            >
+              {apkAvailable ? 'Download APK' : 'Android ZIP'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -864,6 +961,28 @@ export function App() {
                   </div>
                 )}
               </div>
+
+              {/* 3D Animated Characters in Final MP4 Toggle */}
+              <div className="border-t border-white/[0.06] pt-3 flex items-center justify-between gap-3">
+                <div className="flex flex-col">
+                  <span className="text-xs font-semibold text-neutral-200">3D Characters in Final MP4</span>
+                  <span className="text-[11px] text-neutral-400">
+                    Auto-render sharp 3D animated characters into your exported video
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUse3dInVideo((v) => !v)}
+                  disabled={busy}
+                  className={`min-h-[36px] px-3.5 rounded-lg text-xs font-bold border transition-colors shrink-0 cursor-pointer ${
+                    use3dInVideo
+                      ? 'bg-[#39FF14]/15 border-[#39FF14]/70 text-[#39FF14]'
+                      : 'bg-[#0B0F0D] border-white/15 text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  {use3dInVideo ? 'ON' : 'OFF'}
+                </button>
+              </div>
             </div>
 
             {/* Primary Actions */}
@@ -922,16 +1041,16 @@ export function App() {
               </button>
             </div>
 
-            {rightView === 'stage3d' && (
-              <ThreeCharacterStudio
-                slabs={draftScript?.slabs ?? null}
-                contentMode={contentMode}
-                topic={topic}
-                characterBible={draftScript?.character_bible ?? ''}
-                isShorts={isShorts}
-                onAttachCapturedClips={handleAttachCapturedClips}
-              />
-            )}
+            <ThreeCharacterStudio
+              ref={studio3dRef}
+              slabs={draftScript?.slabs ?? null}
+              contentMode={contentMode}
+              topic={topic}
+              characterBible={draftScript?.character_bible ?? ''}
+              isShorts={isShorts}
+              hidden={rightView !== 'stage3d'}
+              onAttachCapturedClips={handleAttachCapturedClips}
+            />
 
             {rightView === 'output' && !hasStudioOutput && (
               <div className="rounded-2xl bg-[#121714] border border-white/[0.08] p-6 flex flex-col gap-4">
@@ -1357,7 +1476,7 @@ export function App() {
         </div>
       )}
 
-      {/* Android App & APK Download Modal */}
+      {/* Install App & Android Project Modal */}
       {showAndroidModal && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
@@ -1368,7 +1487,7 @@ export function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-bold text-white">Android App &amp; APK</h2>
+              <h2 className="text-base font-bold text-white">Install App &amp; Android Source</h2>
               <button
                 type="button"
                 onClick={() => setShowAndroidModal(false)}
@@ -1378,35 +1497,83 @@ export function App() {
               </button>
             </div>
 
-            <p className="text-xs text-neutral-300 leading-relaxed">
-              The updated Android Studio &amp; Jetpack Compose source project includes the cleaned-up UI, Content Modes,
-              custom per-scene clip/photo picker, and smooth video renderer.
-            </p>
+            {/* Direct Compiled Debug APK when available */}
+            {apkAvailable && (
+              <div className="rounded-xl bg-[#0B0F0D] border border-[#39FF14]/50 p-3.5 flex flex-col gap-2.5">
+                <span className="text-xs font-bold text-[#39FF14]">
+                  Download Compiled Android APK
+                </span>
+                <p className="text-xs text-neutral-300 leading-relaxed">
+                  Ready-to-install native Android package (<code className="text-white">RSMovieSpot-debug.apk</code>). Enable &ldquo;Install unknown apps&rdquo; if prompted on Android.
+                </p>
+                <a
+                  href="/downloads/RSMovieSpot-debug.apk"
+                  download="RSMovieSpot-debug.apk"
+                  className="w-full min-h-[44px] flex items-center justify-center rounded-xl bg-[#39FF14] text-black text-sm font-bold hover:brightness-95"
+                >
+                  Download APK (RSMovieSpot-debug.apk)
+                </a>
+              </div>
+            )}
 
-            <a
-              href="/downloads/RSMovieSpot-android-project.zip"
-              download="RSMovieSpot-android-project.zip"
-              className="w-full min-h-[46px] flex items-center justify-center rounded-xl bg-[#39FF14] text-black text-sm font-bold hover:brightness-95"
-            >
-              Download Android Project (.zip)
-            </a>
+            {/* Instant Install on Phone (PWA / WebAPK with 3D Characters) */}
+            <div className="rounded-xl bg-[#0B0F0D] border border-[#39FF14]/35 p-3.5 flex flex-col gap-2.5">
+              <span className="text-xs font-bold text-[#39FF14]">
+                {apkAvailable ? 'Option 2: Install Full 3D App (WebAPK)' : 'Option 1: Install Full 3D App on Phone Now'}
+              </span>
+              <p className="text-xs text-neutral-300 leading-relaxed">
+                Includes all 6 sharp 3D characters, 12 actions, and 3D-to-MP4 export directly on your phone home screen.
+              </p>
+              {isInstallable ? (
+                <button
+                  type="button"
+                  onClick={() => void triggerPwaInstall()}
+                  className="w-full min-h-[44px] rounded-xl bg-[#39FF14] text-black text-sm font-bold hover:brightness-95 cursor-pointer"
+                >
+                  Install App Now
+                </button>
+              ) : isInstalled ? (
+                <span className="text-xs font-semibold text-[#39FF14]">Already installed on this device.</span>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void copyToClipboard('App URL', window.location.origin)}
+                    className="w-full min-h-[42px] rounded-xl bg-[#18211C] border border-[#39FF14]/45 text-[#39FF14] text-xs font-bold hover:bg-[#39FF14]/15 cursor-pointer"
+                  >
+                    Copy App Link &amp; Open in Chrome
+                  </button>
+                  <span className="text-[11px] text-neutral-400 leading-relaxed">
+                    Open the copied link in Chrome (outside preview), then tap <strong>Install App</strong> or Chrome menu <strong>⋮ → Install app / Add to Home screen</strong>.
+                  </span>
+                </div>
+              )}
+            </div>
 
-            <div className="rounded-xl bg-[#0B0F0D] border border-white/[0.06] p-3.5 flex flex-col gap-2 text-xs text-neutral-300 leading-relaxed">
-              <span className="font-semibold text-white">How to get installable APK:</span>
-              <span>
-                1. Push this project to GitHub and open the <strong>Actions</strong> tab — the included{' '}
-                <code className="text-[#39FF14]">Android CI Build</code> workflow builds and gives a downloadable{' '}
-                <strong>RSMovieSpot-debug-apk</strong> file automatically.
+            {/* Native Android Source Project ZIP for .apk */}
+            <div className="rounded-xl bg-[#0B0F0D] border border-white/[0.06] p-3.5 flex flex-col gap-2.5 text-xs text-neutral-300 leading-relaxed">
+              <span className="font-semibold text-white">
+                {apkAvailable ? 'Option 3: Download Android Source (.zip)' : 'Option 2: Download Android Source (.zip) for .APK'}
               </span>
+              <a
+                href="/downloads/RSMovieSpot-android-project.zip"
+                download="RSMovieSpot-android-project.zip"
+                className="w-full min-h-[42px] flex items-center justify-center rounded-xl bg-[#18211C] border border-white/15 text-white text-xs font-semibold hover:border-[#39FF14]/60"
+              >
+                Download Android Project (.zip)
+              </a>
               <span>
-                2. Or open the downloaded ZIP in Android Studio and run <code className="text-[#39FF14]">Build APK</code>.
-              </span>
-              <span>
-                3. For instant use on your phone right now without installing an APK, open Chrome menu and tap{' '}
-                <strong>Add to Home screen</strong>.
+                Push to GitHub and run the included <code className="text-[#39FF14]">Android CI Build</code> workflow (or open in Android Studio → <strong>Build APK</strong>) to compile <code className="text-[#39FF14]">app-debug.apk</code>.
               </span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Offline Status Banner */}
+      {!isOnline && (
+        <div className="fixed bottom-5 left-4 z-50 px-3.5 py-2 rounded-xl bg-amber-950/90 border border-amber-500/45 text-amber-200 text-xs font-medium">
+          Offline — app shell cached; reconnect to render new MP4 videos.
         </div>
       )}
 
