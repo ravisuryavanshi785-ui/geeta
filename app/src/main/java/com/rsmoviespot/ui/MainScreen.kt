@@ -1,8 +1,10 @@
 package com.rsmoviespot.ui
 
+import android.Manifest
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
@@ -70,6 +72,7 @@ import com.rsmoviespot.domain.models.VideoLanguage
 import com.rsmoviespot.domain.models.VisualStyleMode
 import com.rsmoviespot.domain.models.VoiceGender
 import com.rsmoviespot.domain.models.VoiceTone
+import com.rsmoviespot.service.GallerySaver
 import com.rsmoviespot.ui.theme.BgDark
 import com.rsmoviespot.ui.theme.CancelBorder
 import com.rsmoviespot.ui.theme.CancelText
@@ -114,6 +117,18 @@ fun MainScreen(viewModel: VideoViewModel) {
     var toneDropdownOpen by remember { mutableStateOf(false) }
     var pendingScenePickIndex by remember { mutableIntStateOf(-1) }
     var pendingScenePickPanel by remember { mutableIntStateOf(1) }
+    var pendingSaveAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    val legacyWritePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingSaveAction?.invoke()
+        } else {
+            Toast.makeText(context, "Storage permission needed to save to Gallery.", Toast.LENGTH_SHORT).show()
+        }
+        pendingSaveAction = null
+    }
 
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         viewModel.onCustomBgmPicked(uri)
@@ -132,6 +147,52 @@ fun MainScreen(viewModel: VideoViewModel) {
     fun copyText(label: String, value: String) {
         clipboard.setText(AnnotatedString(value))
         Toast.makeText(context, "$label copied", Toast.LENGTH_SHORT).show()
+    }
+
+    fun triggerSaveVideoToGallery() {
+        val runSave = {
+            viewModel.saveCurrentVideoToGallery { _, msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+        if (GallerySaver.hasLegacyWritePermission(context) || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runSave()
+        } else {
+            pendingSaveAction = runSave
+            legacyWritePermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    fun triggerSaveCoverToGallery() {
+        val runSave = {
+            viewModel.saveCoverToGallery { _, msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+        if (GallerySaver.hasLegacyWritePermission(context) || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runSave()
+        } else {
+            pendingSaveAction = runSave
+            legacyWritePermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    fun openVideoExternally(path: String) {
+        val file = File(path)
+        if (!file.exists()) {
+            Toast.makeText(context, "Video file not found.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/mp4")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            context.startActivity(Intent.createChooser(intent, "Open Video With"))
+        }.onFailure {
+            Toast.makeText(context, "No video player app found.", Toast.LENGTH_SHORT).show()
+        }
     }
 
     fun shareFile(path: String, mimeType: String, chooserTitle: String) {
@@ -726,6 +787,12 @@ fun MainScreen(viewModel: VideoViewModel) {
         // Generated Video Player + Controls
         val videoPath = state.generatedVideoPath
         if (videoPath != null) {
+            val durSec = state.videoDurationSec
+            val durLabel = if (durSec > 0) {
+                val mins = durSec / 60
+                val secs = durSec % 60
+                String.format("%d:%02d", mins, secs)
+            } else "Ready"
             Surface(
                 color = SurfaceDark,
                 shape = RoundedCornerShape(16.dp),
@@ -738,15 +805,60 @@ fun MainScreen(viewModel: VideoViewModel) {
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Rendered Video ($durLabel)",
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (state.savedGalleryUri != null) "Saved in Movies/RS Movie Spot" else "Not yet in Gallery",
+                            color = if (state.savedGalleryUri != null) NeonGreen else TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = { showVideoPlayer = true },
+                            onClick = { showVideoPlayer = !showVideoPlayer },
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Play Video", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text(if (showVideoPlayer) "Hide Preview" else "Play Preview", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                        OutlinedButton(
+                            onClick = { triggerSaveVideoToGallery() },
+                            border = BorderStroke(1.dp, NeonGreen.copy(alpha = 0.6f)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = if (state.savedGalleryUri != null) "Saved ✓" else "Save Gallery",
+                                color = NeonGreen,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { openVideoExternally(videoPath) },
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Open Player", color = TextPrimary, fontWeight = FontWeight.Medium, fontSize = 12.sp)
                         }
                         OutlinedButton(
                             onClick = { shareFile(videoPath, "video/mp4", "Share RS Movie Spot Video") },
@@ -754,7 +866,7 @@ fun MainScreen(viewModel: VideoViewModel) {
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Share / Save", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text("Share Video", color = TextPrimary, fontWeight = FontWeight.Medium, fontSize = 12.sp)
                         }
                     }
 
@@ -765,21 +877,31 @@ fun MainScreen(viewModel: VideoViewModel) {
                                     val mc = MediaController(ctx)
                                     mc.setAnchorView(this)
                                     setMediaController(mc)
-                                    setVideoPath(videoPath)
-                                    start()
+                                    setOnPreparedListener { mp ->
+                                        mp.isLooping = false
+                                        seekTo(1)
+                                        start()
+                                    }
+                                    setOnErrorListener { _, _, _ ->
+                                        Toast.makeText(ctx, "Preview error — tap Open Player.", Toast.LENGTH_SHORT).show()
+                                        true
+                                    }
+                                    tag = videoPath
+                                    setVideoURI(Uri.fromFile(File(videoPath)))
                                 }
                             },
                             update = { view ->
                                 if (view.tag != videoPath) {
                                     view.tag = videoPath
-                                    view.setVideoPath(videoPath)
-                                    view.start()
+                                    view.stopPlayback()
+                                    view.setVideoURI(Uri.fromFile(File(videoPath)))
                                 }
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(if (state.isShorts) 9f / 16f else 16f / 9f)
                                 .clip(RoundedCornerShape(12.dp))
+                                .background(Color.Black)
                         )
                     }
                 }
@@ -1216,13 +1338,26 @@ fun MainScreen(viewModel: VideoViewModel) {
                                 .background(Color.Black)
                         )
                     }
-                    Button(
-                        onClick = { shareFile(dialogThumbPath, "image/jpeg", "Share Cover Thumbnail") },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black),
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Share / Save Cover JPG", fontWeight = FontWeight.Bold)
+                        Button(
+                            onClick = { triggerSaveCoverToGallery() },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Color.Black),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Save Gallery", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = { shareFile(dialogThumbPath, "image/jpeg", "Share Cover Thumbnail") },
+                            border = BorderStroke(1.dp, HairlineBorder),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Share JPG", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
                     }
                 }
             }

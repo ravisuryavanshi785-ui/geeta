@@ -15,14 +15,18 @@ import com.rsmoviespot.domain.models.VideoSlab
 import com.rsmoviespot.domain.models.VisualStyleMode
 import com.rsmoviespot.domain.models.VoiceGender
 import com.rsmoviespot.domain.models.VoiceTone
+import com.rsmoviespot.service.GallerySaver
 import com.rsmoviespot.service.VideoRenderEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class VideoViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = VideoRepository()
@@ -237,6 +241,8 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                     statusMessage = "",
                     generatedVideoPath = null,
                     generatedThumbnailPath = null,
+                    savedGalleryUri = null,
+                    videoDurationSec = 0,
                     completedScript = null
                 )
             }
@@ -258,14 +264,31 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 )
+                val (galleryUri, durationSec) = withContext(Dispatchers.IO) {
+                    val dur = GallerySaver.readVideoDurationSeconds(result.videoFile)
+                    val uri = runCatching {
+                        GallerySaver.saveVideoToGallery(
+                            context = getApplication(),
+                            videoFile = result.videoFile,
+                            titleHint = result.script.youtube_title.ifBlank { clean }
+                        )
+                    }.getOrNull()
+                    uri?.toString() to dur
+                }
                 _uiState.update {
                     it.copy(
                         isGenerating = false,
                         progressPercentage = 100,
                         progressText = "Video ready!",
-                        statusMessage = "Video generated successfully!",
+                        statusMessage = if (galleryUri != null) {
+                            "Video ready & saved to Gallery (Movies/RS Movie Spot)!"
+                        } else {
+                            "Video generated! Tap Save to Gallery to export."
+                        },
                         generatedVideoPath = result.videoFile.absolutePath,
                         generatedThumbnailPath = result.thumbnailFile?.absolutePath,
+                        savedGalleryUri = galleryUri,
+                        videoDurationSec = durationSec,
                         completedScript = result.script
                     )
                 }
@@ -284,6 +307,60 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                         statusMessage = "Generation failed: ${err.message ?: "Unknown error"}"
                     )
                 }
+            }
+        }
+    }
+
+    fun saveCurrentVideoToGallery(onResult: (Boolean, String) -> Unit) {
+        val current = _uiState.value
+        val path = current.generatedVideoPath ?: return
+        val file = File(path)
+        if (!file.exists()) {
+            onResult(false, "Video file not found.")
+            return
+        }
+        viewModelScope.launch {
+            val savedUri = withContext(Dispatchers.IO) {
+                GallerySaver.saveVideoToGallery(
+                    context = getApplication(),
+                    videoFile = file,
+                    titleHint = current.completedScript?.youtube_title?.ifBlank { current.topic } ?: current.topic
+                )
+            }
+            if (savedUri != null) {
+                _uiState.update {
+                    it.copy(
+                        savedGalleryUri = savedUri.toString(),
+                        statusMessage = "Saved to Gallery (Movies/RS Movie Spot)!"
+                    )
+                }
+                onResult(true, "Saved to Gallery (Movies/RS Movie Spot)")
+            } else {
+                onResult(false, "Could not save to Gallery. Check storage permission.")
+            }
+        }
+    }
+
+    fun saveCoverToGallery(onResult: (Boolean, String) -> Unit) {
+        val current = _uiState.value
+        val path = current.generatedThumbnailPath ?: return
+        val file = File(path)
+        if (!file.exists()) {
+            onResult(false, "Cover file not found.")
+            return
+        }
+        viewModelScope.launch {
+            val savedUri = withContext(Dispatchers.IO) {
+                GallerySaver.saveImageToGallery(
+                    context = getApplication(),
+                    imageFile = file,
+                    titleHint = current.completedScript?.youtube_title?.ifBlank { current.topic } ?: current.topic
+                )
+            }
+            if (savedUri != null) {
+                onResult(true, "Cover saved to Gallery (Pictures/RS Movie Spot)")
+            } else {
+                onResult(false, "Could not save cover image.")
             }
         }
     }

@@ -197,6 +197,43 @@ object ImageComposer {
         return out
     }
 
+    fun drawVideoFrameOntoStudioCanvas(
+        canvas: Canvas,
+        backdrop: Bitmap,
+        rawFrame: Bitmap,
+        targetWidth: Int,
+        targetHeight: Int,
+        paint: Paint
+    ) {
+        val srcAspect = rawFrame.width.toFloat() / max(1, rawFrame.height)
+        val targetAspect = targetWidth.toFloat() / max(1, targetHeight)
+        val matchesTall = targetHeight > targetWidth && srcAspect in 0.5f..0.78f
+        val matchesClose = kotlin.math.abs(srcAspect - targetAspect) <= 0.16f && rawFrame.height >= rawFrame.width * 0.75f
+        if (matchesTall || matchesClose) {
+            val scale = max(targetWidth.toFloat() / rawFrame.width, targetHeight.toFloat() / rawFrame.height)
+            val scaledW = rawFrame.width * scale
+            val scaledH = rawFrame.height * scale
+            val dx = (targetWidth - scaledW) * 0.5f
+            val dst = RectF(dx, 0f, dx + scaledW, scaledH)
+            canvas.drawBitmap(rawFrame, null, dst, paint)
+            return
+        }
+
+        canvas.drawBitmap(backdrop, 0f, 0f, paint)
+        val isTallCanvas = targetHeight > targetWidth * 1.2f
+        val maxW = targetWidth * (if (isTallCanvas) 0.92f else 0.88f)
+        val maxH = targetHeight * (if (isTallCanvas) 0.68f else 0.82f)
+        val scale = min(maxW / rawFrame.width, maxH / rawFrame.height)
+        val fgW = rawFrame.width * scale
+        val fgH = rawFrame.height * scale
+        val left = (targetWidth - fgW) * 0.5f
+        val minTop = if (isTallCanvas) 110f else 24f
+        val idealTop = (targetHeight - fgH) * (if (isTallCanvas) 0.36f else 0.30f)
+        val top = min(max(0f, targetHeight - fgH), max(minTop, idealTop))
+        val fgRect = RectF(left, top, left + fgW, top + fgH)
+        canvas.drawBitmap(rawFrame, null, fgRect, paint)
+    }
+
     @Suppress("DEPRECATION")
     private fun fastBlurBitmap(context: Context, bitmap: Bitmap, radius: Float): Bitmap {
         return try {

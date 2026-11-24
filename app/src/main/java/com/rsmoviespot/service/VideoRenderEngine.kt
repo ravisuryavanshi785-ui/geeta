@@ -819,11 +819,15 @@ class VideoRenderEngine(
             setInteger(MediaFormat.KEY_BIT_RATE, if (isShorts) 3_500_000 else 4_500_000)
             setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
         }
         val videoEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         videoEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val inputSurface = videoEncoder.createInputSurface()
         videoEncoder.start()
+        val eglRenderer = EglSurfaceRenderer(inputSurface, width, height)
 
         val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, BgmSynth.SAMPLE_RATE, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
@@ -837,6 +841,8 @@ class VideoRenderEngine(
         var videoTrackIdx = -1
         var audioTrackIdx = -1
         var muxerStarted = false
+        var firstVideoPtsUs = -1L
+        var lastVideoMuxPtsUs = -1L
 
         fun tryStartMuxer() {
             if (!muxerStarted && videoTrackIdx >= 0 && audioTrackIdx >= 0) {
@@ -851,6 +857,7 @@ class VideoRenderEngine(
         fun drainVideo(eos: Boolean) {
             if (eos) videoEncoder.signalEndOfInputStream()
             while (true) {
+                if (videoTrackIdx >= 0 && !muxerStarted) break
                 val outIdx = videoEncoder.dequeueOutputBuffer(vInfo, if (eos) 10_000 else 0)
                 when {
                     outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -862,6 +869,15 @@ class VideoRenderEngine(
                     outIdx >= 0 -> {
                         val buf = videoEncoder.getOutputBuffer(outIdx)
                         if ((vInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && vInfo.size > 0 && muxerStarted) {
+                            if (firstVideoPtsUs < 0L) {
+                                firstVideoPtsUs = vInfo.presentationTimeUs
+                            }
+                            var normPts = max(0L, vInfo.presentationTimeUs - firstVideoPtsUs)
+                            if (lastVideoMuxPtsUs >= 0L && normPts <= lastVideoMuxPtsUs) {
+                                normPts = lastVideoMuxPtsUs + (1_000_000L / FPS)
+                            }
+                            lastVideoMuxPtsUs = normPts
+                            vInfo.presentationTimeUs = normPts
                             buf?.position(vInfo.offset)
                             buf?.limit(vInfo.offset + vInfo.size)
                             muxer.writeSampleData(videoTrackIdx, buf!!, vInfo)
@@ -880,17 +896,17 @@ class VideoRenderEngine(
         val drawPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
         val crossfadePaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
         val crossfadeFrames = 6
+        val frameBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val frameCanvas = Canvas(frameBitmap)
 
-        // Feed all video frames first while capturing format, then encode audio once muxer starts or simultaneously
-        // Wait: MediaMuxer requires BOTH tracks added before muxer.start(), so we prime both encoders together!
         var audioSampleCursor = 0
         var audioInputDone = false
         var audioOutputDone = false
 
-        fun stepAudioEncoder(flushAll: Boolean) {
+        fun stepAudioEncoder(flushAll: Boolean, waitTimeoutUs: Long = 0L) {
             while (!audioOutputDone) {
                 if (!audioInputDone) {
-                    val inIdx = audioEncoder.dequeueInputBuffer(0)
+                    val inIdx = audioEncoder.dequeueInputBuffer(waitTimeoutUs)
                     if (inIdx >= 0) {
                         val buf = audioEncoder.getInputBuffer(inIdx)!!
                         buf.clear()
@@ -911,7 +927,10 @@ class VideoRenderEngine(
                         }
                     }
                 }
-                val outIdx = audioEncoder.dequeueOutputBuffer(aInfo, 0)
+                if (audioTrackIdx >= 0 && !muxerStarted) {
+                    if (!flushAll) break
+                }
+                val outIdx = audioEncoder.dequeueOutputBuffer(aInfo, waitTimeoutUs)
                 when {
                     outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         if (audioTrackIdx < 0) {
@@ -931,16 +950,16 @@ class VideoRenderEngine(
                             audioOutputDone = true
                         }
                     }
-                    else -> if (!flushAll || audioInputDone && outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) break
+                    else -> if (!flushAll || (audioInputDone && outIdx == MediaCodec.INFO_TRY_AGAIN_LATER)) break
                 }
                 if (!flushAll) break
             }
         }
 
-        // Prime audio format track
-        for (i in 0 until 20) {
+        // Prime AAC encoder format track with blocking timeout before pushing video frames
+        for (i in 0 until 80) {
             if (audioTrackIdx >= 0) break
-            stepAudioEncoder(false)
+            stepAudioEncoder(flushAll = false, waitTimeoutUs = 10_000L)
         }
 
         try {
@@ -971,7 +990,7 @@ class VideoRenderEngine(
                     val durMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 4000L
                     max(250_000L, durMs * 1000L)
                 } ?: 4_000_000L
-                var cachedClipFrame: Bitmap? = null
+                var cachedRawClipFrame: Bitmap? = null
                 var cachedBucket = -1L
 
                 try {
@@ -981,10 +1000,10 @@ class VideoRenderEngine(
                         val switchFrame = (count / 2).coerceAtLeast(10)
                         val flipBlendFrames = 8
                         val isSecondShot = !isCustomVideoScene && bmpB != null && f >= switchFrame
-                        val videoFrameBmp: Bitmap? = if (customRetriever != null) {
+                        val rawClipFrame: Bitmap? = if (customRetriever != null) {
                             val timeUs = ((f.toLong() * 1_000_000L) / FPS) % customClipDurUs
                             val bucket = f.toLong()
-                            if (bucket != cachedBucket || cachedClipFrame == null) {
+                            if (bucket != cachedBucket || cachedRawClipFrame == null) {
                                 val rawFrame = runCatching {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                                         customRetriever.getScaledFrameAtTime(
@@ -998,87 +1017,90 @@ class VideoRenderEngine(
                                     } ?: customRetriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                                 }.getOrNull()
                                 if (rawFrame != null) {
-                                    val fitted = ImageComposer.composeStudioBitmapFromRealPhoto(context, rawFrame, width, height)
-                                    rawFrame.recycle()
-                                    cachedClipFrame?.recycle()
-                                    cachedClipFrame = fitted
+                                    cachedRawClipFrame?.recycle()
+                                    cachedRawClipFrame = rawFrame
                                     cachedBucket = bucket
                                 }
                             }
-                            cachedClipFrame
+                            cachedRawClipFrame
                         } else null
-                        val activeBmp = videoFrameBmp ?: if (isSecondShot) bmpB!! else bmpA
+                        val activeBmp = if (isSecondShot) bmpB!! else bmpA
                         val shotIndex = if (isSecondShot) sIdx + 3 else sIdx
                         val isHighEnergy = slab.voice_emotion.lowercase() in setOf("hook", "climax", "excited") ||
                             slab.sfx_cue.lowercase() in setOf("boom", "sword", "thunder")
                         val easeT = ((1.0 - kotlin.math.cos(tNorm * Math.PI)) * 0.5).toFloat()
 
-                        val canvas: Canvas = inputSurface.lockCanvas(null)
-                        try {
-                            canvas.drawColor(Color.BLACK)
-                            if (videoFrameBmp != null) {
-                                canvas.drawBitmap(activeBmp, 0f, 0f, drawPaint)
+                        frameCanvas.drawColor(Color.BLACK)
+                        if (rawClipFrame != null) {
+                            ImageComposer.drawVideoFrameOntoStudioCanvas(
+                                canvas = frameCanvas,
+                                backdrop = bmpA,
+                                rawFrame = rawClipFrame,
+                                targetWidth = width,
+                                targetHeight = height,
+                                paint = drawPaint
+                            )
+                        } else {
+                            val applyShotMatrix = { targetShotIdx: Int, localEase: Float, extraX: Float ->
+                                val zoom = when {
+                                    isHighEnergy && targetShotIdx % 2 == 0 -> 1.04f + 0.14f * localEase
+                                    targetShotIdx % 6 == 0 -> 1.03f + 0.13f * localEase
+                                    targetShotIdx % 6 == 1 -> 1.16f - 0.12f * localEase
+                                    else -> 1.10f + 0.04f * kotlin.math.sin(localEase * Math.PI).toFloat()
+                                }
+                                var panX = when (targetShotIdx % 6) {
+                                    2 -> (localEase - 0.5f) * width * 0.06f
+                                    3 -> (0.5f - localEase) * width * 0.06f
+                                    else -> 0f
+                                } + extraX
+                                var panY = when (targetShotIdx % 6) {
+                                    4 -> (0.5f - localEase) * height * 0.045f
+                                    5 -> (localEase - 0.5f) * height * 0.045f
+                                    else -> 0f
+                                }
+                                if (isHighEnergy) {
+                                    panX += (kotlin.math.sin(f * 0.36) * 2.5).toFloat()
+                                    panY += (kotlin.math.cos(f * 0.30) * 2.0).toFloat()
+                                }
+                                val swayDeg = (kotlin.math.sin(localEase * Math.PI * 2.0) * 0.38).toFloat()
+                                matrix.reset()
+                                matrix.postScale(zoom, zoom, width * 0.5f, height * 0.5f)
+                                matrix.postRotate(swayDeg, width * 0.5f, height * 0.5f)
+                                matrix.postTranslate(panX, panY)
+                            }
+
+                            if (isSecondShot && f < switchFrame + flipBlendFrames) {
+                                val blendP = ((f - switchFrame + 1).toFloat() / flipBlendFrames).coerceIn(0f, 1f)
+                                val slideOffset = (1f - blendP) * width * 0.14f * (if (sIdx % 2 == 0) 1f else -1f)
+                                applyShotMatrix(sIdx, easeT, 0f)
+                                frameCanvas.drawBitmap(bmpA, matrix, drawPaint)
+                                applyShotMatrix(shotIndex, easeT, slideOffset)
+                                crossfadePaint.alpha = (blendP * 255f).roundToInt().coerceIn(0, 255)
+                                frameCanvas.drawBitmap(bmpB!!, matrix, crossfadePaint)
                             } else {
-                                val applyShotMatrix = { targetShotIdx: Int, localEase: Float, extraX: Float ->
-                                    val zoom = when {
-                                        isHighEnergy && targetShotIdx % 2 == 0 -> 1.04f + 0.14f * localEase
-                                        targetShotIdx % 6 == 0 -> 1.03f + 0.13f * localEase
-                                        targetShotIdx % 6 == 1 -> 1.16f - 0.12f * localEase
-                                        else -> 1.10f + 0.04f * kotlin.math.sin(localEase * Math.PI).toFloat()
-                                    }
-                                    var panX = when (targetShotIdx % 6) {
-                                        2 -> (localEase - 0.5f) * width * 0.06f
-                                        3 -> (0.5f - localEase) * width * 0.06f
-                                        else -> 0f
-                                    } + extraX
-                                    var panY = when (targetShotIdx % 6) {
-                                        4 -> (0.5f - localEase) * height * 0.045f
-                                        5 -> (localEase - 0.5f) * height * 0.045f
-                                        else -> 0f
-                                    }
-                                    if (isHighEnergy) {
-                                        panX += (kotlin.math.sin(f * 0.36) * 2.5).toFloat()
-                                        panY += (kotlin.math.cos(f * 0.30) * 2.0).toFloat()
-                                    }
-                                    val swayDeg = (kotlin.math.sin(localEase * Math.PI * 2.0) * 0.38).toFloat()
-                                    matrix.reset()
-                                    matrix.postScale(zoom, zoom, width * 0.5f, height * 0.5f)
-                                    matrix.postRotate(swayDeg, width * 0.5f, height * 0.5f)
-                                    matrix.postTranslate(panX, panY)
-                                }
-
-                                if (isSecondShot && f < switchFrame + flipBlendFrames) {
-                                    val blendP = ((f - switchFrame + 1).toFloat() / flipBlendFrames).coerceIn(0f, 1f)
-                                    val slideOffset = (1f - blendP) * width * 0.14f * (if (sIdx % 2 == 0) 1f else -1f)
-                                    applyShotMatrix(sIdx, easeT, 0f)
-                                    canvas.drawBitmap(bmpA, matrix, drawPaint)
-                                    applyShotMatrix(shotIndex, easeT, slideOffset)
-                                    crossfadePaint.alpha = (blendP * 255f).roundToInt().coerceIn(0, 255)
-                                    canvas.drawBitmap(bmpB!!, matrix, crossfadePaint)
-                                } else {
-                                    applyShotMatrix(shotIndex, easeT, 0f)
-                                    canvas.drawBitmap(activeBmp, matrix, drawPaint)
-                                }
+                                applyShotMatrix(shotIndex, easeT, 0f)
+                                frameCanvas.drawBitmap(activeBmp, matrix, drawPaint)
                             }
-
-                            if (prevBmp != null && f < crossfadeFrames) {
-                                val alpha = ((1f - (f.toFloat() / crossfadeFrames)) * 255f).roundToInt().coerceIn(0, 255)
-                                crossfadePaint.alpha = alpha
-                                canvas.drawBitmap(prevBmp, 0f, 0f, crossfadePaint)
-                            }
-
-                            ImageComposer.drawWatermarkOverlay(canvas, width, height, isShorts)
-                            if (slab.stat_badge.isNotBlank()) {
-                                ImageComposer.drawStatBadgeOverlay(canvas, slab.stat_badge, width, isShorts)
-                            }
-                            val activeCaption = if (part2Text.isNotEmpty() && f >= count / 2) part2Text else part1Text
-                            ImageComposer.drawPopCaptionOverlay(canvas, activeCaption, width, height, isShorts)
-                            if (isLastScene && f >= (count * 0.45f).roundToInt()) {
-                                ImageComposer.drawSubscribeEndCard(canvas, width, height, isShorts)
-                            }
-                        } finally {
-                            inputSurface.unlockCanvasAndPost(canvas)
                         }
+
+                        if (prevBmp != null && f < crossfadeFrames) {
+                            val alpha = ((1f - (f.toFloat() / crossfadeFrames)) * 255f).roundToInt().coerceIn(0, 255)
+                            crossfadePaint.alpha = alpha
+                            frameCanvas.drawBitmap(prevBmp, 0f, 0f, crossfadePaint)
+                        }
+
+                        ImageComposer.drawWatermarkOverlay(frameCanvas, width, height, isShorts)
+                        if (slab.stat_badge.isNotBlank()) {
+                            ImageComposer.drawStatBadgeOverlay(frameCanvas, slab.stat_badge, width, isShorts)
+                        }
+                        val activeCaption = if (part2Text.isNotEmpty() && f >= count / 2) part2Text else part1Text
+                        ImageComposer.drawPopCaptionOverlay(frameCanvas, activeCaption, width, height, isShorts)
+                        if (isLastScene && f >= (count * 0.45f).roundToInt()) {
+                            ImageComposer.drawSubscribeEndCard(frameCanvas, width, height, isShorts)
+                        }
+
+                        val ptsNs = (frameCounter.toLong() * 1_000_000_000L) / FPS
+                        eglRenderer.drawBitmapAndSwap(frameBitmap, ptsNs)
 
                         frameCounter++
                         drainVideo(false)
@@ -1088,7 +1110,7 @@ class VideoRenderEngine(
                         }
                     }
                 } finally {
-                    cachedClipFrame?.recycle()
+                    cachedRawClipFrame?.recycle()
                     runCatching { customRetriever?.release() }
                 }
             }
@@ -1098,6 +1120,8 @@ class VideoRenderEngine(
                 stepAudioEncoder(true)
             }
         } finally {
+            runCatching { eglRenderer.release() }
+            runCatching { frameBitmap.recycle() }
             runCatching { videoEncoder.stop() }
             runCatching { videoEncoder.release() }
             runCatching { inputSurface.release() }

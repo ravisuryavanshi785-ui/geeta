@@ -163,5 +163,7 @@ data class MainUiState(
     val statusMessage: String = "",
     val generatedVideoPath: String? = null,
     val generatedThumbnailPath: String? = null,
+    val savedGalleryUri: String? = null,
+    val videoDurationSec: Int = 0,
     val completedScript: VideoScriptResponse? = null
 )
